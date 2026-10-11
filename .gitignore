@@ -1,0 +1,9 @@
+/dist/
+/.cache/
+web/node_modules/
+internal/webui/dist/*
+!internal/webui/dist/index.html
+*.log
+deploy/orohost/.bond007.env
+deploy/router/backups/
+deploy/router/.router.env

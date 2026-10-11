@@ -1,0 +1,299 @@
+// Package proto defines the Bond007 wire format spoken between client and
+// server over UDP.
+//
+// Every datagram starts with an 8-byte common header:
+//
+//	0      1        2..5        6      7
+//	+------+--------+-----------+------+-------+
+//	| 0xB7 | ver|ty | session   | link | flags |
+//	+------+--------+-----------+------+-------+
+//
+// DATA frames append an 8-byte big-endian sequence number followed by one raw
+// IP packet. The sequence number is global per session and direction, so the
+// receiver can de-duplicate copies that arrive over several links (the first
+// copy wins, every later copy is discarded).
+//
+// PROBE / PROBE_ACK frames carry a fixed binary body used for health metrics.
+// Control frames (HELLO, HELLO_ACK, POLICY, REJECT, BYE) carry JSON bodies:
+// they are rare, and JSON keeps them easy to extend.
+//
+// NOTE: frames are not encrypted or authenticated beyond the HELLO token.
+// See docs/SECURITY.md.
+package proto
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+)
+
+const (
+	Magic   byte = 0xB7
+	Version byte = 1
+
+	HeaderLen     = 8
+	DataHeaderLen = HeaderLen + 8
+	ProbeBodyLen  = 4 + 8 + 4 + 4 + 2 + 4 + 2 + 1 + 4 + 4
+	ProbeAckLen   = 4 + 8 + 8 + 8
+	// MaxFrame bounds a datagram: an IP packet up to 64KiB-1 plus headers.
+	MaxFrame = 65535 + DataHeaderLen
+)
+
+type Type byte
+
+const (
+	TypeHello    Type = 1
+	TypeHelloAck Type = 2
+	TypeData     Type = 3
+	TypeProbe    Type = 4
+	TypeProbeAck Type = 5
+	TypePolicy   Type = 6
+	TypeBye      Type = 7
+	TypeReject   Type = 8
+)
+
+func (t Type) String() string {
+	switch t {
+	case TypeHello:
+		return "HELLO"
+	case TypeHelloAck:
+		return "HELLO_ACK"
+	case TypeData:
+		return "DATA"
+	case TypeProbe:
+		return "PROBE"
+	case TypeProbeAck:
+		return "PROBE_ACK"
+	case TypePolicy:
+		return "POLICY"
+	case TypeBye:
+		return "BYE"
+	case TypeReject:
+		return "REJECT"
+	}
+	return "UNKNOWN"
+}
+
+var (
+	ErrShort   = errors.New("proto: frame too short")
+	ErrMagic   = errors.New("proto: bad magic")
+	ErrVersion = errors.New("proto: unsupported version")
+)
+
+// Header is the common prefix of every frame.
+type Header struct {
+	Type    Type
+	Session uint32
+	Link    uint8
+	Flags   uint8
+}
+
+// PutHeader writes h into b[:HeaderLen].
+func PutHeader(b []byte, h Header) {
+	b[0] = Magic
+	b[1] = Version<<4 | byte(h.Type)&0x0f
+	binary.BigEndian.PutUint32(b[2:6], h.Session)
+	b[6] = h.Link
+	b[7] = h.Flags
+}
+
+// ParseHeader validates and decodes the common header.
+func ParseHeader(b []byte) (Header, error) {
+	if len(b) < HeaderLen {
+		return Header{}, ErrShort
+	}
+	if b[0] != Magic {
+		return Header{}, ErrMagic
+	}
+	if b[1]>>4 != Version {
+		return Header{}, ErrVersion
+	}
+	return Header{
+		Type:    Type(b[1] & 0x0f),
+		Session: binary.BigEndian.Uint32(b[2:6]),
+		Link:    b[6],
+		Flags:   b[7],
+	}, nil
+}
+
+// AppendData builds a DATA frame into dst (which is reset) and returns it.
+func AppendData(dst []byte, session uint32, link uint8, seq uint64, payload []byte) []byte {
+	n := DataHeaderLen + len(payload)
+	if cap(dst) < n {
+		dst = make([]byte, n)
+	}
+	dst = dst[:n]
+	PutHeader(dst, Header{Type: TypeData, Session: session, Link: link})
+	binary.BigEndian.PutUint64(dst[HeaderLen:DataHeaderLen], seq)
+	copy(dst[DataHeaderLen:], payload)
+	return dst
+}
+
+// SetLink rewrites the link byte of an already-built frame in place.
+func SetLink(frame []byte, link uint8) { frame[6] = link }
+
+// ParseData returns the sequence number and payload of a DATA frame.
+func ParseData(b []byte) (seq uint64, payload []byte, err error) {
+	if len(b) < DataHeaderLen {
+		return 0, nil, ErrShort
+	}
+	return binary.BigEndian.Uint64(b[HeaderLen:DataHeaderLen]), b[DataHeaderLen:], nil
+}
+
+// Probe is sent by the client on every link several times per second. Besides
+// measuring RTT it reports the client's view of the link so the server can
+// schedule downstream traffic with the same knowledge.
+type Probe struct {
+	Seq         uint32
+	SentAt      int64 // sender clock, nanoseconds
+	RTTMicros   uint32
+	JitterMicro uint32
+	LossPermil  uint16
+	CapKbps     uint32 // estimated capacity (downstream) in kbit/s
+	Weight      uint16 // downstream scheduling weight x10 (0 = server decides)
+	State       uint8  // link state in the low bits, ProbeBackupBit if backup
+	LastRTTMicr uint32 // most recent raw RTT sample (fast congestion signal)
+	RxKbps      uint32 // rate the client received on this link in the last interval
+}
+
+const (
+	ProbeStateMask = 0x7f
+	ProbeBackupBit = 0x80
+)
+
+func AppendProbe(dst []byte, session uint32, link uint8, p Probe) []byte {
+	dst = append(dst[:0], make([]byte, HeaderLen+ProbeBodyLen)...)
+	PutHeader(dst, Header{Type: TypeProbe, Session: session, Link: link})
+	b := dst[HeaderLen:]
+	binary.BigEndian.PutUint32(b[0:], p.Seq)
+	binary.BigEndian.PutUint64(b[4:], uint64(p.SentAt))
+	binary.BigEndian.PutUint32(b[12:], p.RTTMicros)
+	binary.BigEndian.PutUint32(b[16:], p.JitterMicro)
+	binary.BigEndian.PutUint16(b[20:], p.LossPermil)
+	binary.BigEndian.PutUint32(b[22:], p.CapKbps)
+	binary.BigEndian.PutUint16(b[26:], p.Weight)
+	b[28] = p.State
+	binary.BigEndian.PutUint32(b[29:], p.LastRTTMicr)
+	binary.BigEndian.PutUint32(b[33:], p.RxKbps)
+	return dst
+}
+
+func ParseProbe(b []byte) (Probe, error) {
+	if len(b) < HeaderLen+ProbeBodyLen {
+		return Probe{}, ErrShort
+	}
+	b = b[HeaderLen:]
+	return Probe{
+		Seq:         binary.BigEndian.Uint32(b[0:]),
+		SentAt:      int64(binary.BigEndian.Uint64(b[4:])),
+		RTTMicros:   binary.BigEndian.Uint32(b[12:]),
+		JitterMicro: binary.BigEndian.Uint32(b[16:]),
+		LossPermil:  binary.BigEndian.Uint16(b[20:]),
+		CapKbps:     binary.BigEndian.Uint32(b[22:]),
+		Weight:      binary.BigEndian.Uint16(b[26:]),
+		State:       b[28],
+		LastRTTMicr: binary.BigEndian.Uint32(b[29:]),
+		RxKbps:      binary.BigEndian.Uint32(b[33:]),
+	}, nil
+}
+
+// ProbeAck echoes a probe and reports what the server has received on the
+// link so the client can compute upstream loss and goodput.
+type ProbeAck struct {
+	Seq       uint32
+	SentAt    int64
+	RxPackets uint64
+	RxBytes   uint64
+}
+
+func AppendProbeAck(dst []byte, session uint32, link uint8, a ProbeAck) []byte {
+	dst = append(dst[:0], make([]byte, HeaderLen+ProbeAckLen)...)
+	PutHeader(dst, Header{Type: TypeProbeAck, Session: session, Link: link})
+	b := dst[HeaderLen:]
+	binary.BigEndian.PutUint32(b[0:], a.Seq)
+	binary.BigEndian.PutUint64(b[4:], uint64(a.SentAt))
+	binary.BigEndian.PutUint64(b[12:], a.RxPackets)
+	binary.BigEndian.PutUint64(b[20:], a.RxBytes)
+	return dst
+}
+
+func ParseProbeAck(b []byte) (ProbeAck, error) {
+	if len(b) < HeaderLen+ProbeAckLen {
+		return ProbeAck{}, ErrShort
+	}
+	b = b[HeaderLen:]
+	return ProbeAck{
+		Seq:       binary.BigEndian.Uint32(b[0:]),
+		SentAt:    int64(binary.BigEndian.Uint64(b[4:])),
+		RxPackets: binary.BigEndian.Uint64(b[12:]),
+		RxBytes:   binary.BigEndian.Uint64(b[20:]),
+	}, nil
+}
+
+// Hello registers a link with a session. The first HELLO for an unknown
+// session id creates the session.
+type Hello struct {
+	Token      string `json:"token"`
+	ClientName string `json:"client"`
+	Version    string `json:"version"`
+	OS         string `json:"os"`
+	LinkName   string `json:"link"`
+	LinkKind   string `json:"kind"`
+}
+
+// HelloAck assigns the client its tunnel address.
+type HelloAck struct {
+	ClientIP   string `json:"ip"`
+	PrefixLen  int    `json:"prefix"`
+	GatewayIP  string `json:"gateway"`
+	DNS        string `json:"dns"`
+	MTU        int    `json:"mtu"`
+	ServerName string `json:"server"`
+	Version    string `json:"version"`
+	// Epoch identifies the server-side session instance. If it changes (the
+	// server restarted and rebuilt the session) the client resets its
+	// receive window because the server's sequence numbers restart at 1.
+	Epoch int64 `json:"epoch"`
+}
+
+// Policy tells the server how to schedule downstream traffic for a session.
+type Policy struct {
+	Mode                   string            `json:"mode"`
+	Strategy               string            `json:"strategy"`
+	Redundancy             int               `json:"redundancy"`
+	SmallPacketMirrorBytes int               `json:"smallMirror"`
+	RealtimeMirror         bool              `json:"realtimeMirror"`
+	RealtimePorts          string            `json:"realtimePorts"`
+	ReorderMode            string            `json:"reorderMode"`
+	ReorderMs              int               `json:"reorderMs"`
+	QueueDepth             int               `json:"queueDepth"`
+	Pacing                 bool              `json:"pacing"`
+	PacingStartMbps        int               `json:"pacingStartMbps"`
+	PacingDelayMs          int               `json:"pacingDelayMs"`
+	PacingLossPct          int               `json:"pacingLossPct"`
+	LatencyWeighting       bool              `json:"latencyWeighting"`
+	LinkMaxMbps            map[uint8]float64 `json:"linkMaxMbps,omitempty"`
+}
+
+type Reject struct {
+	Reason string `json:"reason"`
+}
+
+// AppendJSON builds a control frame with a JSON body.
+func AppendJSON(dst []byte, t Type, session uint32, link uint8, v any) ([]byte, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	dst = append(dst[:0], make([]byte, HeaderLen)...)
+	PutHeader(dst, Header{Type: t, Session: session, Link: link})
+	return append(dst, body...), nil
+}
+
+// ParseJSON decodes the JSON body of a control frame.
+func ParseJSON(b []byte, v any) error {
+	if len(b) < HeaderLen {
+		return ErrShort
+	}
+	return json.Unmarshal(b[HeaderLen:], v)
+}

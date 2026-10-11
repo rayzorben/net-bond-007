@@ -1,0 +1,14 @@
+[Unit]
+Description=Bond007 multipath bonding client
+Documentation=https://github.com/rayzorben/bond007
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/bond007 run --config /etc/bond007/client.json
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

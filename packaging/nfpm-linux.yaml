@@ -1,0 +1,31 @@
+name: bond007
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: Raymond Bennett <raymond.bennett@gmail.com>
+description: |
+  Bond007 multipath bonding client. Bonds Ethernet, Wi-Fi, USB tethering,
+  cellular and Bluetooth into one faster, more reliable connection.
+homepage: https://github.com/rayzorben/bond007
+license: MIT
+contents:
+  - src: ${BIN}
+    dst: /usr/bin/bond007
+    file_info: { mode: 0755 }
+  - src: packaging/linux/bond007.service
+    dst: /usr/lib/systemd/system/bond007.service
+  - dst: /etc/bond007
+    type: dir
+    file_info: { mode: 0755 }
+scripts:
+  postinstall: packaging/linux/postinstall.sh
+  preremove: packaging/linux/preremove.sh
+overrides:
+  deb:
+    depends: [iproute2]
+  rpm:
+    depends: [iproute]
+  archlinux:
+    depends: [iproute2]

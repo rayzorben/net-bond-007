@@ -1,0 +1,23 @@
+name: bond007
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+maintainer: Raymond Bennett <raymond.bennett@gmail.com>
+description: Bond007 multipath bonding client (bonds WAN, Wi-Fi repeater, USB tethering and cellular into one link)
+homepage: https://github.com/rayzorben/bond007
+license: MIT
+depends: [kmod-tun]
+contents:
+  - src: ${BIN}
+    dst: /usr/bin/bond007
+    file_info: { mode: 0755 }
+  - src: packaging/openwrt/bond007.init
+    dst: /etc/init.d/bond007
+    file_info: { mode: 0755 }
+  - src: packaging/openwrt/client.json
+    dst: /etc/bond007/client.json
+    type: config|noreplace
+scripts:
+  postinstall: packaging/openwrt/postinst.sh
+  preremove: packaging/openwrt/prerm.sh

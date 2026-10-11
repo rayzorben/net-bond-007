@@ -1,0 +1,36 @@
+<script lang="ts">
+  import { Lock } from '@lucide/svelte'
+  import { store } from '../lib/store.svelte'
+  let pw = $state('')
+  let err = $state('')
+  let busy = $state(false)
+  async function submit(e: Event) {
+    e.preventDefault()
+    busy = true
+    err = (await store.login(pw)) ?? ''
+    busy = false
+  }
+</script>
+
+<div class="wrap">
+  <div class="blob"></div>
+  <form class="card glass" onsubmit={submit}>
+    <div class="ic"><Lock size={22} /></div>
+    <h1>BOND<span class="grad-text">007</span></h1>
+    <p class="muted">This dashboard is password protected.</p>
+    <input class="input" class:err={!!err} type="password" placeholder="Password" bind:value={pw} autocomplete="current-password" />
+    {#if err}<div class="e">{err}</div>{/if}
+    <button class="btn primary lg" disabled={busy || !pw}>Unlock</button>
+  </form>
+</div>
+
+<style>
+  .wrap { min-height: 100vh; display: grid; place-items: center; position: relative; overflow: hidden; }
+  .blob { position: absolute; width: 640px; height: 640px; background: radial-gradient(closest-side, rgba(139, 92, 246, 0.28), transparent); filter: blur(20px); }
+  form { position: relative; width: min(360px, 92vw); padding: 28px; display: grid; gap: 12px; justify-items: center; text-align: center; }
+  .ic { width: 52px; height: 52px; border-radius: 16px; display: grid; place-items: center; background: var(--accent-bg); color: var(--accent-2); }
+  h1 { margin: 0; font-size: 24px; font-weight: 780; letter-spacing: 0.06em; }
+  p { margin: 0 0 6px; }
+  .btn { width: 100%; }
+  .e { color: var(--bad); font-size: 12.5px; }
+</style>
