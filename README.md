@@ -52,18 +52,101 @@ The package installs a procd service. It also adds a `net-bond-007` firewall zon
 
 ## Server
 
+The server is a single unprivileged Docker container. It needs no `NET_ADMIN`, no `/dev/net/tun` and no host networking, so it runs anywhere Docker runs: a VPS, a home server, Azure, AWS, GCP, and so on.
+
+| Port | Protocol | Purpose | Expose to |
+|---|---|---|---|
+| `7007` | **UDP** | Bond traffic from clients | The internet (your clients) |
+| `8080` | TCP | Dashboard | Only yourself (your IP, VPN or SSH tunnel) |
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `NET_BOND_007_TOKEN` | yes | Shared token that clients must present |
+| `NET_BOND_007_UI_PASSWORD` | yes | Dashboard password |
+| `NET_BOND_007_NAME` | no | Server name shown in the dashboard |
+| `NET_BOND_007_LISTEN` | no | Bond listen address (default `:7007`) |
+| `NET_BOND_007_UI_LISTEN` | no | Dashboard listen address (default `:8080`) |
+| `NET_BOND_007_DNS` | no | Upstream DNS for egress |
+
+Config is stored in `/data/server.json` inside the container. Mount a volume there so it survives restarts. Every setting can also be changed live from the dashboard.
+
+### 1. Build the image
+
+```bash
+docker build -t net-bond-007-server .
+```
+
+To run it on another machine, tag it and push it to a registry you control (Docker Hub, GHCR, ACR, ECR):
+
+```bash
+docker tag net-bond-007-server <registry>/net-bond-007-server:latest
+docker push <registry>/net-bond-007-server:latest
+```
+
+### 2. Run it
+
+Generate strong secrets first:
+
+```bash
+export NET_BOND_007_TOKEN=$(openssl rand -hex 24)
+export NET_BOND_007_UI_PASSWORD=$(openssl rand -base64 18)
+```
+
+**docker run:**
+
 ```bash
 docker run -d --name net-bond-007 --restart unless-stopped \
   -p 7007:7007/udp -p 8080:8080 \
-  -e NET_BOND_007_TOKEN=change-me -e NET_BOND_007_UI_PASSWORD=change-me-too \
-  -v net-bond-007-data:/data net-bond-007-server:0.1.0
+  -e NET_BOND_007_TOKEN -e NET_BOND_007_UI_PASSWORD \
+  -v net-bond-007-data:/data net-bond-007-server
 ```
 
-- **Production (orohost):** the server runs in Docker on `orohost`, the home server, as image [`rayzorben/net-bond-007-server`](https://hub.docker.com/r/rayzorben/net-bond-007-server). The container is declared with [stay-go](../stay-go), not here: see `stay-go/config/hosts/orohost.yaml` (the `compose:` entry and `secrets.net-bond-007.*`) and `stay-go/config/files/docker/net-bond-007/`. Clients connect to the home public IP on **UDP 7007**, which the home router forwards to 192.168.1.50. The dashboard is at `http://192.168.1.50:8077`, reachable on the LAN or over Tailscale (qbittorrent owns 8080). Server config lives in `/storage/apps/net-bond-007/server.json`. The token and dashboard password are in `deploy/orohost/.net-bond-007.env` (git-ignored) and, encrypted, in stay-go.
+**docker compose** (builds from source and reads the two variables from your shell or a `.env` file next to the compose file):
 
-  **To ship an update:** run `deploy/orohost/deploy.sh`. It builds the image, pushes `:<source-hash>` and `:latest` to Docker Hub, then runs `stay-go --update=compose/net-bond-007` on orohost, which pulls the image and recreates the container only if it changed. You need `docker login -u rayzorben` on this machine and on orohost. To change ports, env or volumes, edit the stay-go files instead and run `stay-go -c config --apply=compose/net-bond-007` on orohost from `/storage/dropbox/Dropbox/PC/development/stay-go`. Use that path, not `~/Dropbox`, because stay-go state records it. Roll back by retagging an older `:<hash>` as `:latest`, or pin the tag in the compose file.
-- **Compose:** `deploy/docker-compose.yml`.
-- **Dashboard:** `http://<server>:8080` shows connected clients, each with its own bond map, plus egress connection stats.
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Then point clients at `<server-public-ip-or-dns>:7007` with the token, and open the dashboard at `http://<server>:8080`.
+
+To update, rebuild or pull the new image and recreate the container. Settings persist in the `/data` volume.
+
+### Cloud hosts
+
+The checklist is the same on every provider:
+1. Allow **inbound UDP 7007** from anywhere.
+2. Allow TCP 8080 only from your own IP, or reach it over a VPN or SSH tunnel.
+3. Give the host a static public IP or a DNS name.
+
+**Any VPS** (DigitalOcean, Hetzner, Linode, Vultr, Oracle Cloud, …): install Docker, run the commands above, and open UDP 7007 in the provider firewall and in `ufw`/`firewalld` if you use one. This is the simplest and usually the cheapest option.
+
+**AWS**
+- **EC2** (recommended): launch a small Linux instance, attach an Elastic IP, and add security group rules for UDP 7007 (`0.0.0.0/0`) and TCP 8080 (your IP). Then install Docker and run the container as above.
+- **ECS on Fargate**: push the image to ECR and create a task with port mappings `7007/udp` and `8080/tcp`. Set the two variables (preferably from Secrets Manager) and mount EFS at `/data`. Expose UDP 7007 through a **Network Load Balancer** with a UDP listener, or run the task with a public IP. Application Load Balancers do not support UDP.
+
+**Azure**
+- **VM** (recommended): create a Linux VM with a static public IP. Add NSG inbound rules for UDP 7007 and TCP 8080 (your IP), then install Docker and run the container.
+- **Azure Container Instances**: push to ACR (or use any registry), then:
+
+  ```bash
+  az container create -g <rg> -n net-bond-007 \
+    --image <registry>/net-bond-007-server:latest \
+    --ports 7007 8080 --protocol UDP --ip-address Public --dns-name-label <name> \
+    --secure-environment-variables NET_BOND_007_TOKEN=$NET_BOND_007_TOKEN NET_BOND_007_UI_PASSWORD=$NET_BOND_007_UI_PASSWORD \
+    --azure-file-volume-share-name <share> --azure-file-volume-account-name <account> \
+    --azure-file-volume-account-key <key> --azure-file-volume-mount-path /data
+  ```
+
+  The CLI sets one protocol for every port. To get UDP 7007 and TCP 8080 together, deploy from a YAML or ARM file that lists each port with its own protocol, or skip the dashboard port and use the VM option.
+- **Azure Container Apps**: supports TCP ingress only, with no UDP, so it **cannot** host the bond port. Use a VM or ACI.
+
+**Google Cloud**: a Compute Engine VM, either with Docker or with the "deploy container" option, plus firewall rules for UDP 7007 and TCP 8080. Cloud Run does not support UDP.
+
+**Kubernetes**: run a Deployment with a PVC at `/data` and a `LoadBalancer` Service with `protocol: UDP` on port 7007. Expose 8080 separately, or reach it with `kubectl port-forward`.
+
+**Home server**: run the container as above, forward **UDP 7007** on your router to the host, and use your public IP or a dynamic DNS name as the server address.
+
+> Traffic between client and server is **not encrypted yet** (only the token is checked). See [docs/SECURITY.md](docs/SECURITY.md) before you expose a server.
 
 ## Build
 

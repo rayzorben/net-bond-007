@@ -265,7 +265,12 @@ func newRig(t *testing.T, links []struct {
 	ccfg.Health.ProbeTimeoutMs = 400
 	ccfg.Health.DownAfterMs = 600
 	ccfg.Health.DegradedRTTMs = 2000
-	ccfg.Interfaces.Exclude = ""
+	// A LAN bridge that is never a link (phone relays live on it).
+	ifaces = append(ifaces, platform.Iface{
+		Name: "br-lan", Kind: "ethernet", Index: 99, Up: true,
+		IPv4: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/8")},
+	})
+	ccfg.Interfaces.Exclude = "br-*"
 	ccfg.SpeedTest.Enabled = false // fake interfaces: no real-network tests
 	if mutate != nil {
 		mutate(ccfg)

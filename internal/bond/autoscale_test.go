@@ -164,3 +164,25 @@ func TestMeteredLinkIsFailover(t *testing.T) {
 		t.Fatalf("single starlink should go direct: %+v", p)
 	}
 }
+
+// A phone relay is not an interface of this machine: when it is the only
+// trusted link, stay in the tunnel instead of going direct through it.
+func TestNoDirectViaRelay(t *testing.T) {
+	var a AutoScaler
+	now := time.Now()
+	ls := []LinkRel{{ID: 1, Usable: true, Rel: 0.99, NoDirect: true}}
+	var p Plan
+	for i := 0; i < 60; i++ {
+		p = a.Update(now.Add(time.Duration(i)*time.Second), ls, params)
+	}
+	if p.Direct {
+		t.Fatalf("went direct via a relay link: %+v", p)
+	}
+	ls[0].NoDirect = false
+	for i := 60; i < 120; i++ {
+		p = a.Update(now.Add(time.Duration(i)*time.Second), ls, params)
+	}
+	if !p.Direct || p.DirectVia != 1 {
+		t.Fatalf("a normal single link should go direct: %+v", p)
+	}
+}

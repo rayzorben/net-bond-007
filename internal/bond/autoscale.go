@@ -28,6 +28,10 @@ type LinkRel struct {
 	// towards copies, benching or direct mode, and are only made active
 	// when no other link is usable.
 	Metered bool
+	// NoDirect links can't carry traffic outside the tunnel (a phone relay
+	// is not an interface of this machine), so they never become the
+	// direct-bypass link.
+	NoDirect bool
 }
 
 type Plan struct {
@@ -175,7 +179,7 @@ func (a *AutoScaler) Update(now time.Time, links []LinkRel, p AutoParams) Plan {
 			a.direct = false
 		}
 	}
-	plan.Direct = a.direct && len(active) >= 1 && len(meteredUp) == 0
+	plan.Direct = a.direct && len(active) >= 1 && len(meteredUp) == 0 && !active[0].NoDirect
 	if plan.Direct {
 		plan.DirectVia = active[0].ID
 	}

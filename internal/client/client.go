@@ -47,6 +47,8 @@ type Client struct {
 	// Overridable for tests.
 	Discover func() ([]platform.Iface, error)
 	Dial     func(iface platform.Iface, server netip.AddrPort) (*net.UDPConn, error)
+	// DialRelay opens a link socket to a phone relay on the LAN.
+	DialRelay func(phone netip.AddrPort) (*net.UDPConn, error)
 	// NoTunnel disables the OS adapter; packets go to Deliver instead.
 	NoTunnel bool
 	Deliver  func(pkt []byte)
@@ -57,6 +59,7 @@ type Client struct {
 	links     map[string]*clink
 	ids       map[string]uint8
 	ifaces    []platform.Iface
+	relayIfs  []platform.Iface // phone relays, as interface entries
 	server    netip.AddrPort
 	serverErr string
 	epoch     int64
@@ -72,6 +75,7 @@ type Client struct {
 	tunUndo func()
 	tunErr  string
 
+	relays     relays
 	names      names.Cache
 	usage      *Usage
 	speed      *speedTester
@@ -96,6 +100,7 @@ func New(cfg *config.Store[config.Client], log *slog.Logger) *Client {
 		kick:     make(chan struct{}, 1),
 	}
 	c.Dial = c.dialBound
+	c.DialRelay = dialRelay
 	if p := cfg.Path(); p != "" {
 		c.usage = LoadUsage(filepath.Join(filepath.Dir(p), "usage.json"))
 		c.speed = newSpeedTester(filepath.Join(filepath.Dir(p), "speedtests.json"))
@@ -110,6 +115,7 @@ func New(cfg *config.Store[config.Client], log *slog.Logger) *Client {
 func (c *Client) Start() {
 	c.newSession()
 	c.cfg.Subscribe(c.onConfig)
+	c.relayApply(c.cfg.Get())
 	go c.loop()
 	c.poke()
 }
@@ -117,6 +123,7 @@ func (c *Client) Start() {
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		c.relayClose()
 		c.usage.Save(true)
 		c.mu.Lock()
 		for name, l := range c.links {
@@ -259,6 +266,7 @@ func (c *Client) onConfig(old, cfg *config.Client) {
 			c.closeTunnel()
 		}
 	}
+	c.relayApply(cfg)
 	c.applyPolicy(e, cfg)
 	e.SetHistory(cfg.Health.HistorySeconds)
 	c.policySent.Store(0) // resend policy to the server now
@@ -401,9 +409,16 @@ func (c *Client) reconcile() {
 			want[it.Name] = it
 		}
 	}
+	relayIfs, relayAddrs := c.relayLinks(now)
+	c.relayIfs = relayIfs
+	for _, it := range relayIfs {
+		if _, clash := want[it.Name]; !clash && c.eligibility(cfg, it) == "bonded" {
+			want[it.Name] = it
+		}
+	}
 	for name, l := range c.links {
 		it, ok := want[name]
-		if !ok || it.PrimaryIPv4() != l.iface.PrimaryIPv4() || it.Index != l.iface.Index {
+		if !ok || it.PrimaryIPv4() != l.iface.PrimaryIPv4() || it.Index != l.iface.Index || l.relayTo != relayAddrs[name] {
 			c.log.Info("link removed", "link", name)
 			l.close(true)
 			delete(c.links, name)
@@ -415,7 +430,7 @@ func (c *Client) reconcile() {
 			continue
 		}
 		id := c.linkID(name)
-		l, err := c.openLink(e, it, id)
+		l, err := c.openLink(e, it, id, relayAddrs[name])
 		if err != nil {
 			c.log.Warn("cannot open link", "link", name, "err", err)
 			continue
@@ -753,6 +768,8 @@ type StateView struct {
 	Interfaces []IfaceView     `json:"interfaces"`
 	Warnings   []string        `json:"warnings"`
 	Auto       *AutoView       `json:"auto,omitempty"`
+	// RelayListen is where phone relays announce themselves ("" = off).
+	RelayListen string `json:"relayListen,omitempty"`
 }
 
 func (c *Client) Snapshot(history int) StateView {
@@ -775,7 +792,7 @@ func (c *Client) Snapshot(history int) StateView {
 		v.Server.Resolved = c.server.String()
 	}
 	v.Server.Error = c.serverErr
-	ifaces := c.ifaces
+	ifaces := append(append([]platform.Iface(nil), c.ifaces...), c.relayIfs...)
 	linksByName := map[string]*clink{}
 	for n, l := range c.links {
 		linksByName[n] = l
@@ -793,6 +810,9 @@ func (c *Client) Snapshot(history int) StateView {
 				u := c.usage.Get(l.Name)
 				lv.Usage = &bond.MeterUsage{UsedBytes: u.Bytes, CapBytes: uint64(lc.MonthlyCapGB * 1e9), CycleStart: u.CycleStart}
 				lv.Usage.OverCap = lv.Usage.CapBytes > 0 && u.Bytes >= lv.Usage.CapBytes
+			}
+			if cl.relayTo.IsValid() {
+				lv.Relay = c.relayInfo(l.Name, time.Now())
 			}
 			if !cl.helloAcked.Load() && lv.LastError == "" {
 				lv.LastError = cl.status()
@@ -859,6 +879,15 @@ func (c *Client) Snapshot(history int) StateView {
 	}
 	if cfg.Server.Token == "" && cfg.Server.Address != "" {
 		v.Warnings = append(v.Warnings, "No access token set.")
+	}
+	if cfg.Relay.Enabled {
+		listen, err := c.relayStatus()
+		v.RelayListen = listen
+		if err != "" {
+			v.Warnings = append(v.Warnings, "Phone relays: cannot listen on "+cfg.Relay.Listen+": "+err)
+		} else if cfg.Relay.Token == "" {
+			v.Warnings = append(v.Warnings, "Phone relays are on but no pairing token is set, so phones are refused.")
+		}
 	}
 	if cfg.UI.Password == "" && !isLoopbackListen(cfg.UI.Listen) {
 		v.Warnings = append(v.Warnings, "The dashboard is reachable from the network without a password.")
@@ -1078,7 +1107,7 @@ func (c *Client) autoScale(now time.Time, cfg *config.Client, e *bond.Engine, li
 	for _, l := range links {
 		var r float64
 		l.link.Health(func(h *bond.Health) { r = h.Reliability })
-		ls = append(ls, bond.LinkRel{ID: l.id, Usable: l.link.State().Usable(), Rel: r, Metered: l.link.Metered()})
+		ls = append(ls, bond.LinkRel{ID: l.id, Usable: l.link.State().Usable(), Rel: r, Metered: l.link.Metered(), NoDirect: l.relayTo.IsValid()})
 	}
 	p := c.auto.Update(now, ls, bond.AutoParams{
 		Target:           b.TargetDeliveryPct / 100,

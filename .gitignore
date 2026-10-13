@@ -4,6 +4,6 @@ web/node_modules/
 internal/webui/dist/*
 !internal/webui/dist/index.html
 *.log
-deploy/orohost/.net-bond-007.env
 deploy/router/backups/
 deploy/router/.router.env
+deploy/.env

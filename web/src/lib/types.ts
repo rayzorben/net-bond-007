@@ -9,10 +9,18 @@ export interface LinkView {
   metered?: boolean; meterShare?: number
   tested?: { downBps: number; upBps: number; pingMs: number; at: string }
   usage?: { usedBytes: number; capBytes?: number; cycleStart: string; overCap?: boolean }
+  relay?: RelayInfo
   txBytes: number; rxBytes: number; txPackets: number; rxPackets: number
   wins: number; dups: number; drops: number; errors: number; winShare: number; queue: number
   local?: string; remote?: string; lastError?: string
   history?: Sample[]
+}
+
+/** The phone behind a phone-relay link (from its last announcement). */
+export interface RelayInfo {
+  phone: string; model?: string; carrier?: string; version?: string
+  cellular: boolean; battery: number; charging: boolean
+  tempC?: number; thermal: number; signal: number; seenMs: number
 }
 
 export interface EngineView {

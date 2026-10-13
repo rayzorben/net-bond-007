@@ -27,12 +27,13 @@ fi
 
 BACKUP=$(ls -d deploy/router/backups/slate-ax-* 2>/dev/null | tail -1)
 [ -n "$BACKUP" ] && [ -s "$BACKUP/sysupgrade-config.tar.gz" ] || { echo "No backup found in deploy/router/backups/. Back up first."; exit 1; }
-. deploy/orohost/.net-bond-007.env
 ENVFILE=deploy/router/.router.env
 [ -f "$ENVFILE" ] && . "$ENVFILE"
 ROUTER_UI_PASSWORD=${ROUTER_UI_PASSWORD:-$(openssl rand -base64 12 | tr -d '/+=')}
-SERVER=${SERVER:?set SERVER=<home-public-ip>:7007 in $ENVFILE}   # orohost via the home router's UDP 7007 forward
-(umask 077; printf 'ROUTER_UI_PASSWORD=%s\nSERVER=%s\n' "$ROUTER_UI_PASSWORD" "$SERVER" > "$ENVFILE")
+SERVER=${SERVER:?set SERVER=<server-host>:7007 in $ENVFILE}   # your Net-Bond-007 server (UDP 7007)
+NET_BOND_007_TOKEN=${NET_BOND_007_TOKEN:?set NET_BOND_007_TOKEN in $ENVFILE}   # server access token
+RELAY_TOKEN=${RELAY_TOKEN:-$(tr -dc 'a-km-np-z2-9' </dev/urandom | head -c 8)}   # pairing token for the phone relay app
+(umask 077; printf 'ROUTER_UI_PASSWORD=%s\nSERVER=%s\nNET_BOND_007_TOKEN=%s\nRELAY_TOKEN=%s\n' "$ROUTER_UI_PASSWORD" "$SERVER" "$NET_BOND_007_TOKEN" "$RELAY_TOKEN" > "$ENVFILE")
 # Multi-WAN state before we touched anything (from the backup).
 PRE_KMWAN=$(awk '/^package kmwan/{p=1} p&&/option enable/{gsub(/\x27/,"",$3); print $3; exit}' "$BACKUP/uci-export.txt")
 
@@ -56,6 +57,7 @@ R "cat > /etc/net-bond-007/client.json && chmod 600 /etc/net-bond-007/client.jso
   "server": { "address": "$SERVER", "token": "$NET_BOND_007_TOKEN", "enabled": true },
   "tunnel": { "fullTunnel": true, "routerMode": true, "dnsOverride": false },
   "interfaces": { "autoAdd": true, "exclude": "lo*,br-*,lan*,docker*,veth*,tailscale*,wg*,tun*,tap*,net-bond-007*,ifb*,dummy*,sit*,ip6tnl*,gre*,phy*,mon*,wlan*,ra*,rai*,ath*,wifi*" },
+  "relay": { "enabled": true, "token": "$RELAY_TOKEN", "listen": "192.168.8.1:7008" },
   "ui": { "listen": "0.0.0.0:7007", "password": "$ROUTER_UI_PASSWORD" }
 }
 JSON

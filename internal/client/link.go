@@ -2,6 +2,7 @@ package client
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,9 +18,12 @@ type clink struct {
 	c     *Client
 	e     *bond.Engine
 	iface platform.Iface
-	id    uint8
-	conn  *net.UDPConn
-	link  *bond.Link
+	// relayTo is the phone this link goes through (phone relay links only);
+	// the socket talks to the phone instead of the server.
+	relayTo netip.AddrPort
+	id      uint8
+	conn    *net.UDPConn
+	link    *bond.Link
 
 	helloAcked atomic.Bool
 	rejected   atomic.Pointer[string]
@@ -44,12 +48,18 @@ type clink struct {
 	lastAckSeen time.Time
 }
 
-func (c *Client) openLink(e *bond.Engine, it platform.Iface, id uint8) (*clink, error) {
-	conn, err := c.Dial(it, c.server)
+func (c *Client) openLink(e *bond.Engine, it platform.Iface, id uint8, relayTo netip.AddrPort) (*clink, error) {
+	var conn *net.UDPConn
+	var err error
+	if relayTo.IsValid() {
+		conn, err = c.DialRelay(relayTo)
+	} else {
+		conn, err = c.Dial(it, c.server)
+	}
 	if err != nil {
 		return nil, err
 	}
-	l := &clink{c: c, e: e, iface: it, id: id, conn: conn, done: make(chan struct{}), opened: time.Now()}
+	l := &clink{c: c, e: e, iface: it, relayTo: relayTo, id: id, conn: conn, done: make(chan struct{}), opened: time.Now()}
 	l.link = e.AddLink(id, it.Name, it.Kind, func(f []byte) error {
 		_, err := conn.Write(f)
 		return err

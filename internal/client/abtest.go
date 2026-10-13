@@ -133,7 +133,7 @@ func (c *Client) bestPhysical() *clink {
 	var best *clink
 	var bestRTT time.Duration
 	for _, l := range c.links {
-		if !l.link.State().Usable() || l.link.Benched() {
+		if !l.link.State().Usable() || l.link.Benched() || l.relayTo.IsValid() {
 			continue
 		}
 		var rtt time.Duration

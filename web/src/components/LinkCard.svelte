@@ -58,6 +58,13 @@
     {#if link.tested}
       <span class="kv" title="Last stand-alone speed test of this connection ({new Date(link.tested.at).toLocaleString()})">tested <b class="num">{bps(link.tested.downBps, 0)}↓ {bps(link.tested.upBps, 0)}↑</b></span>
     {/if}
+    {#if link.relay}
+      {@const r = link.relay}
+      <span class="chip info" title="Phone relay at {r.phone}{r.model ? ` (${r.model})` : ''}{r.tempC ? ` · ${r.tempC.toFixed(0)}°C` : ''}{r.thermal >= 3 ? ' · phone is throttling from heat' : ''}">
+        via phone{r.carrier ? ` · ${r.carrier}` : ''}{r.signal >= 0 ? ` · ${r.signal}/4 bars` : ''}{r.battery >= 0 ? ` · ${r.battery}%${r.charging ? '⚡' : ''}` : ''}
+      </span>
+      {#if r.thermal >= 3}<span class="chip warn">hot</span>{/if}
+    {/if}
     {#if link.backup}<span class="chip">backup</span>{/if}
     {#if link.metered}
       <span class="chip info" title={link.meterShare ? `Carries up to ${Math.round(link.meterShare * 100)}% while other links work; everything when they fail` : 'Failover only while other links work'}>

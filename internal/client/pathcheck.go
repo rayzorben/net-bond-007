@@ -85,6 +85,9 @@ func (c *Client) PathCheck() PathReport {
 	c.mu.Lock()
 	var its []platform.Iface
 	for _, l := range c.links {
+		if l.relayTo.IsValid() {
+			continue // a phone relay is not an interface of this machine
+		}
 		its = append(its, l.iface)
 	}
 	c.mu.Unlock()

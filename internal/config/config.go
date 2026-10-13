@@ -25,6 +25,7 @@ type Client struct {
 	Tunnel     Tunnel          `json:"tunnel" label:"Virtual network" help:"The virtual adapter your OS sends traffic into."`
 	Interfaces Interfaces      `json:"interfaces" label:"Interface discovery" help:"Which network interfaces become bonded links."`
 	SpeedTest  SpeedTest       `json:"speedTest" label:"Speed tests" help:"Measure each connection's real bandwidth now and then, only while it is idle."`
+	Relay      Relay           `json:"relay" label:"Phone relays" help:"Phones on your network running the Net-Bond-007 Relay app share their cellular data as bonded links."`
 	Links      map[string]Link `json:"links" schema:"-"`
 	// Version of the saved settings format, used to migrate old defaults.
 	Version int `json:"configVersion" schema:"-"`
@@ -123,6 +124,12 @@ type SpeedTest struct {
 	URL             string  `json:"url" label:"Speed test server" help:"Cloudflare-compatible endpoint (/__down and /__up)." adv:"1" fill:"1"`
 }
 
+type Relay struct {
+	Enabled bool   `json:"enabled" label:"Accept phone relays" help:"Listen for the relay app on your local network. Each phone appears as a link named relay-<name>."`
+	Token   string `json:"token" label:"Pairing token" help:"Enter this in the relay app. Phones are refused until it is set." secret:"1"`
+	Listen  string `json:"listen" label:"Listen address" help:"UDP address the relay app announces itself to. Only phones on networks that are not bonded links (your LAN) are accepted." adv:"1" fill:"1"`
+}
+
 type UI struct {
 	Listen    string `json:"listen" label:"Listen address" help:"Where this dashboard is served. Use 0.0.0.0:7007 to reach it from other devices (set a password!)." adv:"1"`
 	Password  string `json:"password" label:"Dashboard password" help:"Leave empty for no login (only safe on 127.0.0.1)." secret:"1"`
@@ -161,6 +168,7 @@ func DefaultClient() *Client {
 			AutoAdd: true, ScanMs: 2000,
 			Exclude: "lo*,docker*,veth*,br-*,virbr*,vmnet*,vboxnet*,tailscale*,zt*,wg*,tun*,tap*,utun*,net-bond-007*,awdl*,llw*,anpi*,ap1,bridge*,gif*,stf*,ipsec*,ppp*,isatap*,Teredo*,*Loopback*,vEthernet*,lxc*,cni*,flannel*,kube*,ifb*,dummy*,sit*,ip6tnl*",
 		},
+		Relay: Relay{Listen: "0.0.0.0:7008"},
 		Links: map[string]Link{},
 		// Version stays 0 here: it must come from the saved file so old files
 		// are recognised and migrated. Normalize stamps the current version.
@@ -177,6 +185,11 @@ func (c *Client) Validate() error {
 		}
 	}
 	errs = append(errs, checkRanges(c)...)
+	if c.Relay.Enabled {
+		if _, _, err := splitHostPort(c.Relay.Listen); err != nil {
+			errs = append(errs, fmt.Errorf("relay.listen: %w", err))
+		}
+	}
 	if _, err := sched.ParsePorts(c.Bonding.RealtimePorts); err != nil {
 		errs = append(errs, fmt.Errorf("bonding.realtimePorts: %w", err))
 	}

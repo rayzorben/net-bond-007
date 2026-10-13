@@ -169,6 +169,12 @@ class RelayService : Service() {
             tm.signalStrength?.let { j.put("signal", it.level) } // 0..4 bars
             j.put("carrier", tm.networkOperatorName)
         }
+        Status.battery = j.optInt("battery", -1)
+        Status.charging = j.optBoolean("charging")
+        Status.tempC = j.optDouble("tempC", Double.NaN)
+        Status.thermal = j.optInt("thermal")
+        Status.signal = j.optInt("signal", -1)
+        Status.carrier = j.optString("carrier")
         return j
     }
 

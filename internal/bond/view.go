@@ -33,6 +33,7 @@ type LinkView struct {
 	Share     float64          `json:"meterShare,omitempty"` // fraction it may carry while others work
 	Usage     *MeterUsage      `json:"usage,omitempty"`      // client only
 	Tested    *TestedSpeed     `json:"tested,omitempty"`     // client only: last speed test
+	Relay     *RelayInfo       `json:"relay,omitempty"`      // client only: phone relay link
 	Reliab    float64          `json:"reliability"`
 	TxBytes   uint64           `json:"txBytes"`
 	RxBytes   uint64           `json:"rxBytes"`
@@ -48,6 +49,21 @@ type LinkView struct {
 	Remote    string           `json:"remote,omitempty"`
 	LastError string           `json:"lastError,omitempty"`
 	History   []metrics.Sample `json:"history,omitempty"`
+}
+
+// RelayInfo describes the phone behind a relay link, from its last hello.
+type RelayInfo struct {
+	Phone    string  `json:"phone"` // LAN address
+	Model    string  `json:"model,omitempty"`
+	Carrier  string  `json:"carrier,omitempty"`
+	Version  string  `json:"version,omitempty"`
+	Cellular bool    `json:"cellular"`
+	Battery  int     `json:"battery"` // percent; -1 unknown
+	Charging bool    `json:"charging"`
+	TempC    float64 `json:"tempC,omitempty"`
+	Thermal  int     `json:"thermal"`
+	Signal   int     `json:"signal"` // 0..4 bars; -1 unknown
+	SeenMs   int64   `json:"seenMs"` // since the last hello
 }
 
 // TestedSpeed is the link's last stand-alone speed test.

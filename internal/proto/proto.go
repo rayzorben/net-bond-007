@@ -52,6 +52,10 @@ const (
 	TypeReject   Type = 8
 	// TypeNack asks the peer to retransmit missing DATA sequence numbers.
 	TypeNack Type = 9
+	// Relay control frames travel only between a phone running the relay
+	// app and the client on the same LAN; they never reach the server.
+	TypeRelayHello Type = 10 // phone -> client, every 2 s
+	TypeRelayAck   Type = 11 // client -> phone
 )
 
 func (t Type) String() string {
@@ -74,6 +78,10 @@ func (t Type) String() string {
 		return "REJECT"
 	case TypeNack:
 		return "NACK"
+	case TypeRelayHello:
+		return "RELAY_HELLO"
+	case TypeRelayAck:
+		return "RELAY_ACK"
 	}
 	return "UNKNOWN"
 }
@@ -289,6 +297,32 @@ type Policy struct {
 	// Metered links (phone hotspots): the share of traffic each may carry
 	// while other links work (0 = failover only). Absent = not metered.
 	MeteredShare map[uint8]float64 `json:"meteredShare,omitempty"`
+}
+
+// RelayHello announces a phone that shares its cellular data. The phone
+// copies every other frame between the client (Wi-Fi) and the server
+// (cellular) without looking inside it.
+type RelayHello struct {
+	Token     string  `json:"token"`
+	Name      string  `json:"name"`
+	Version   string  `json:"version"`
+	Model     string  `json:"model"`
+	Cellular  bool    `json:"cellular"` // the phone has mobile data right now
+	Battery   int     `json:"battery"`  // percent; -1 unknown
+	Charging  bool    `json:"charging"`
+	TempC     float64 `json:"tempC"`
+	Thermal   int     `json:"thermal"` // Android thermal status 0 (none) .. 6 (shutdown)
+	Signal    int     `json:"signal"`  // 0..4 bars; -1 unknown
+	Carrier   string  `json:"carrier"`
+	UpBytes   uint64  `json:"upBytes"`
+	DownBytes uint64  `json:"downBytes"`
+}
+
+// RelayAck accepts or refuses a relay and tells it where the server is.
+type RelayAck struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+	Server string `json:"server,omitempty"` // host:port, resolved by the phone over cellular
 }
 
 type Reject struct {

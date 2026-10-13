@@ -56,62 +56,70 @@ class Relay(
         }
     }
 
-    fun onWifi(net: Network, gateway: InetAddress?) = synchronized(lock) {
-        if (closed) return
-        val target = settings.routerHost.takeIf { it.isNotBlank() }
-            ?.let { runCatching { net.getByName(it) }.getOrNull() } ?: gateway
-        router = target
-        Status.router = target?.hostAddress
-        if (net == lanNet && lan != null) return
-        lan?.close()
-        try {
-            val s = DatagramSocket(null)
-            s.reuseAddress = true
-            s.bind(InetSocketAddress(settings.relayPort))
-            net.bindSocket(s)
-            lan = s; lanNet = net
-            Status.wifi = true
-            thread(name = "relay-lan", isDaemon = true) { lanLoop(s) }
-            Log.i(TAG, "Wi-Fi up, router $target, listening on :${settings.relayPort}")
-        } catch (e: Exception) {
-            lan = null; lanNet = null; Status.wifi = false
-            Status.error = "Wi-Fi socket: ${e.message}"
-            Log.w(TAG, "Wi-Fi socket failed", e)
+    fun onWifi(net: Network, gateway: InetAddress?) {
+        synchronized(lock) {
+            if (closed) return
+            val target = settings.routerHost.takeIf { it.isNotBlank() }
+                ?.let { runCatching { net.getByName(it) }.getOrNull() } ?: gateway
+            router = target
+            Status.router = target?.hostAddress
+            if (net == lanNet && lan != null) return
+            lan?.close()
+            try {
+                val s = DatagramSocket(null)
+                s.reuseAddress = true
+                s.bind(InetSocketAddress(settings.relayPort))
+                net.bindSocket(s)
+                lan = s; lanNet = net
+                Status.wifi = true
+                thread(name = "relay-lan", isDaemon = true) { lanLoop(s) }
+                Log.i(TAG, "Wi-Fi up, router $target, listening on :${settings.relayPort}")
+            } catch (e: Exception) {
+                lan = null; lanNet = null; Status.wifi = false
+                Status.error = "Wi-Fi socket: ${e.message}"
+                Log.w(TAG, "Wi-Fi socket failed", e)
+            }
         }
     }
 
-    fun onWifiLost(net: Network) = synchronized(lock) {
-        if (net != lanNet) return
-        lan?.close(); lan = null; lanNet = null
-        router = null; routerReturn = null
-        Status.wifi = false; Status.router = null
-        Log.i(TAG, "Wi-Fi lost")
-    }
-
-    fun onCellular(net: Network) = synchronized(lock) {
-        if (closed || (net == cellNet && cell != null)) return
-        cell?.close()
-        try {
-            val s = DatagramSocket()
-            net.bindSocket(s)
-            cell = s; cellNet = net
-            server = null // re-resolve on this network (NAT64 prefixes differ)
-            Status.server = null
-            Status.cellular = true
-            thread(name = "relay-cell", isDaemon = true) { cellLoop(s) }
-            Log.i(TAG, "cellular up")
-        } catch (e: Exception) {
-            cell = null; cellNet = null; Status.cellular = false
-            Status.error = "cellular socket: ${e.message}"
-            Log.w(TAG, "cellular socket failed", e)
+    fun onWifiLost(net: Network) {
+        synchronized(lock) {
+            if (net != lanNet) return
+            lan?.close(); lan = null; lanNet = null
+            router = null; routerReturn = null
+            Status.wifi = false; Status.router = null
+            Log.i(TAG, "Wi-Fi lost")
         }
     }
 
-    fun onCellularLost(net: Network) = synchronized(lock) {
-        if (net != cellNet) return
-        cell?.close(); cell = null; cellNet = null
-        Status.cellular = false
-        Log.i(TAG, "cellular lost")
+    fun onCellular(net: Network) {
+        synchronized(lock) {
+            if (closed || (net == cellNet && cell != null)) return
+            cell?.close()
+            try {
+                val s = DatagramSocket()
+                net.bindSocket(s)
+                cell = s; cellNet = net
+                server = null // re-resolve on this network (NAT64 prefixes differ)
+                Status.server = null
+                Status.cellular = true
+                thread(name = "relay-cell", isDaemon = true) { cellLoop(s) }
+                Log.i(TAG, "cellular up")
+            } catch (e: Exception) {
+                cell = null; cellNet = null; Status.cellular = false
+                Status.error = "cellular socket: ${e.message}"
+                Log.w(TAG, "cellular socket failed", e)
+            }
+        }
+    }
+
+    fun onCellularLost(net: Network) {
+        synchronized(lock) {
+            if (net != cellNet) return
+            cell?.close(); cell = null; cellNet = null
+            Status.cellular = false
+            Log.i(TAG, "cellular lost")
+        }
     }
 
     /** Router -> server. Only frames from the router are forwarded. */
@@ -200,10 +208,11 @@ class Relay(
         while (!closed) {
             try {
                 resolveServer()
+                val tel = telemetry() // also refreshes the phone health on screen
                 val s = lan
                 val r = router
                 if (s != null && r != null) {
-                    val body = telemetry()
+                    val body = tel
                         .put("token", settings.token)
                         .put("name", settings.name)
                         .put("version", BuildConfig.VERSION_NAME)

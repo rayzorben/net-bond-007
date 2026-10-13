@@ -16,11 +16,12 @@ is, the app shows "Waiting for the router".
 
 ## Build and install
 
-One-time SDK setup (installs into `~/Android/Sdk`; `local.properties` points there):
+One-time SDK setup (installs into `~/Android/Sdk`; `local.properties` points there).
+`sdkmanager` now forwards to Google's new `android` CLI, which accepts the SDK
+terms itself; add `--no-metrics` to opt out of its usage reporting:
 
 ```bash
-sdkmanager --sdk_root=$HOME/Android/Sdk --licenses
-sdkmanager --sdk_root=$HOME/Android/Sdk "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+/opt/android-sdk/cmdline-tools/latest/bin/android --sdk=$HOME/Android/Sdk sdk install platforms/android-35 build-tools/35.0.0 platform-tools
 ```
 
 On the phone: Developer options, USB debugging on, plug in, accept the prompt.
