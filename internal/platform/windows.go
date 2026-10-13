@@ -5,6 +5,7 @@ package platform
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,6 +114,9 @@ func ConfigureTunnel(t TunnelSpec) (func(), error) {
 	}
 	for _, r := range t.Routes {
 		run("netsh", "interface", "ipv4", "delete", "route", r.String(), idx)
+		if t.Direct {
+			continue // leave it to the OS default route
+		}
 		if err := run("netsh", "interface", "ipv4", "add", "route", r.String(), idx, t.Gateway.String(), "metric=1", "store=active"); err != nil {
 			return func() {}, err
 		}
@@ -129,7 +133,11 @@ func DefaultConfigPath(role string) string {
 	if pd == "" {
 		pd = `C:\ProgramData`
 	}
-	return filepath.Join(pd, "Bond007", role+".json")
+	return filepath.Join(pd, "Net-Bond-007", role+".json")
 }
 
 func TunName(requested string) string { return requested }
+
+// DefaultGateway is not needed here: in direct mode the tunnel's routes are
+// simply not installed, so traffic follows the OS default route.
+func DefaultGateway(string) netip.Addr { return netip.Addr{} }

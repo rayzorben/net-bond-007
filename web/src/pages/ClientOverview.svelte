@@ -14,11 +14,14 @@
   import Toggle from '../components/Toggle.svelte'
   import KindIcon from '../components/KindIcon.svelte'
   import Onboarding from '../components/Onboarding.svelte'
+  import ABTest from '../components/ABTest.svelte'
+  import PathCheck from '../components/PathCheck.svelte'
+  import SpeedTests from '../components/SpeedTests.svelte'
 
   let { st }: { st: ClientState } = $props()
 
   const lanes: Lane[] = $derived(st.links.map((l) => ({
-    key: key(l), name: l.name, label: l.label, kind: l.kind, state: l.state, backup: l.backup,
+    key: key(l), name: l.name, label: l.label, kind: l.kind, state: l.state, backup: l.backup, benched: l.benched,
     rtt: l.rttMs, loss: l.lossPct, up: l.txBps, down: l.rxBps,
     winRatio: l.wins + l.dups ? l.wins / (l.wins + l.dups) : 0,
   })))
@@ -38,6 +41,22 @@
     mirror: 'Every packet on every link: maximum reliability',
     speed: 'No duplicates: maximum combined bandwidth',
     custom: `Each packet on ${st.engine.redundancy} links`,
+  })
+
+  // Plain-English summary of what automatic scaling is doing right now.
+  const autoHelp = $derived.by(() => {
+    const a = st.auto
+    if (!a) return null
+    const n = live.filter((l) => !l.benched).length
+    const bench = a.benched?.length ? ` · ${a.benched.join(', ')} benched (still monitored)` : ''
+    switch (a.mode) {
+      case 'direct': return `Automatic: going direct over ${a.directVia}: it's the only reliable link, so the tunnel is bypassed${bench}`
+      case 'balancing': return `Automatic: links are reliable, load-balancing across ${n} for speed${bench}`
+      case 'mirroring': return `Automatic: links are unreliable, mirroring every packet on ${n} links${bench}`
+      case 'redundant': return `Automatic: ${a.copies} copies of each packet across ${n} links${bench}`
+      case 'single': return `Automatic: one reliable link${bench}`
+      default: return `Automatic: waiting for links${bench}`
+    }
   })
 
   async function setBonding(patch: (c: any) => void, msg: string) {
@@ -67,7 +86,7 @@
     <div class="hh">
       <div>
         <h2>Bond map</h2>
-        <p class="muted">{modeHelp[store.config?.bonding?.mode ?? 'smart']}{st.engine.reorderHoldMs ? ` · reorder hold ${ms(st.engine.reorderHoldMs)}` : ''}</p>
+        <p class="muted">{autoHelp ?? modeHelp[store.config?.bonding?.mode ?? 'smart']}{st.engine.reorderHoldMs ? ` · reorder hold ${ms(st.engine.reorderHoldMs)}` : ''}</p>
       </div>
       <div class="ctl">
         <Segmented value={store.config?.bonding?.mode ?? 'smart'}
@@ -101,7 +120,9 @@
     <StatCard title="Best path latency" value={best ? best.toFixed(best >= 100 ? 0 : 1) : '—'} unit="ms"
       sub={live.length > 1 ? `spread to ${ms(worst)}; you always get the fastest copy` : 'single path'} />
     <StatCard title="Redundancy" value={redundancy ? redundancy.toFixed(2) : '—'} unit="×"
-      sub={`${st.engine.reorderSkipped} packets lost on every path · ${st.engine.reorderWaited} reordered`} />
+      sub={st.engine.arq
+        ? `${st.engine.gapsRecovered} lost packets repaired · ${st.engine.reorderSkipped} unrecoverable`
+        : `${st.engine.reorderSkipped} packets lost on every path · ${st.engine.reorderWaited} reordered`} />
   </section>
 
   <section class="row2">
@@ -131,6 +152,10 @@
       <LinkCard link={l} delay={i * 40} onopen={() => (store.selected = key(l))} />
     {/each}
   </section>
+
+  <SpeedTests />
+  <ABTest />
+  <PathCheck />
 
   {#if others.length}
     <div class="sh"><h3 class="section-title">Other interfaces</h3><span class="muted">detected on this device</span></div>

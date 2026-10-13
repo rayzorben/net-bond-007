@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [svelte()],
   server: {
     port: 5173,
-    proxy: { '/api': { target: process.env.BOND007_API ?? 'http://127.0.0.1:7007', changeOrigin: true } },
+    proxy: { '/api': { target: process.env.NET_BOND_007_API ?? 'http://127.0.0.1:7007', changeOrigin: true } },
   },
   build: { outDir: '../internal/webui/dist', emptyOutDir: true, chunkSizeWarningLimit: 1200 },
 })

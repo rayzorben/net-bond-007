@@ -143,3 +143,42 @@ func TestParseCIDRs(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestMigratesV1ReorderDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	// A file saved by v0.1.x: no configVersion, old 60ms hold, no new keys.
+	os.WriteFile(path, []byte(`{"bonding":{"mode":"smart","reorderMs":60}}`), 0o600)
+	st, err := Load(path, DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := st.Get()
+	if c.Bonding.ReorderMs != 400 || !c.Bonding.Retransmit || !c.Bonding.Shaping || c.Version != clientConfigVersion {
+		t.Fatalf("not migrated: hold=%d rtx=%v shape=%v v=%d", c.Bonding.ReorderMs, c.Bonding.Retransmit, c.Bonding.Shaping, c.Version)
+	}
+	// A deliberate user choice on v2 is left alone.
+	if err := st.Mutate(func(c *Client) { c.Bonding.ReorderMs = 50 }); err != nil {
+		t.Fatal(err)
+	}
+	st2, _ := Load(path, DefaultClient)
+	if st2.Get().Bonding.ReorderMs != 50 {
+		t.Fatal("migration overrode a v2 user setting")
+	}
+}
+
+func TestMigrateRenamedTunnel(t *testing.T) {
+	c := DefaultClient()
+	c.Version = 2
+	c.Tunnel.InterfaceName = "bond" + "007"
+	c.Interfaces.Exclude = "lo*,bond" + "007*,wg*"
+	c.Normalize()
+	if c.Tunnel.InterfaceName != "net-bond-007" || c.Interfaces.Exclude != "lo*,net-bond-007*,wg*" {
+		t.Fatalf("not migrated: %q %q", c.Tunnel.InterfaceName, c.Interfaces.Exclude)
+	}
+	c.Tunnel.InterfaceName = "custom0"
+	c.Version = 2
+	c.Normalize()
+	if c.Tunnel.InterfaceName != "custom0" {
+		t.Fatal("custom tunnel name overwritten")
+	}
+}

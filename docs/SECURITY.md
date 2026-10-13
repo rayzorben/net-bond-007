@@ -1,11 +1,11 @@
 # Security notes (round 1)
 
-> **Traffic between the Bond007 client and server is NOT encrypted or authenticated.**
+> **Traffic between the Net-Bond-007 client and server is NOT encrypted or authenticated.**
 > This was a deliberate round-1 scope decision. Read this before using it on networks you don't trust.
 
 ## What is protected today
 
-- **Your HTTPS, QUIC, SSH and VPN traffic stays encrypted end-to-end.** Bond007 forwards those bytes untouched; the server never sees inside them.
+- **Your HTTPS, QUIC, SSH and VPN traffic stays encrypted end-to-end.** Net-Bond-007 forwards those bytes untouched; the server never sees inside them.
 - **Joining needs a token.** HELLO frames carry a shared access token, compared in constant time. Wrong tokens get `REJECT bad-token`.
 - **Anti-spoofing.** A client may only send from the tunnel address it was assigned.
 - **Egress policy.** By default clients cannot reach private, loopback, link-local (including cloud metadata at `169.254.169.254`), CGNAT or multicast addresses through the server (`egress.allowPrivate`).

@@ -1,5 +1,5 @@
 {
   "ui": { "listen": "0.0.0.0:7007" },
   "tunnel": { "routerMode": true, "dnsOverride": false },
-  "interfaces": { "exclude": "lo*,br-*,lan*,docker*,veth*,tailscale*,wg*,tun*,tap*,bond007*,ifb*,dummy*,sit*,ip6tnl*,gre*,phy*,mon*" }
+  "interfaces": { "exclude": "lo*,br-*,lan*,docker*,veth*,tailscale*,wg*,tun*,tap*,net-bond-007*,ifb*,dummy*,sit*,ip6tnl*,gre*,phy*,mon*" }
 }

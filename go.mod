@@ -1,4 +1,4 @@
-module github.com/rayzorben/bond007
+module github.com/rayzorben/net-bond-007
 
 go 1.27.1
 

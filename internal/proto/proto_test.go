@@ -96,3 +96,23 @@ func TestJSONRoundTrip(t *testing.T) {
 		t.Fatalf("got %+v err %v", out, err)
 	}
 }
+
+func TestNackRoundTrip(t *testing.T) {
+	in := []SeqRange{{Start: 10, Count: 1}, {Start: 1 << 40, Count: 300}}
+	f := AppendNack(nil, 7, 2, in)
+	h, _ := ParseHeader(f)
+	if h.Type != TypeNack || h.Session != 7 {
+		t.Fatalf("header %+v", h)
+	}
+	out, err := ParseNack(f)
+	if err != nil || len(out) != 2 || out[0] != in[0] || out[1] != in[1] {
+		t.Fatalf("got %+v %v", out, err)
+	}
+	if _, err := ParseNack(f[:HeaderLen+5]); err == nil {
+		t.Fatal("truncated frame accepted")
+	}
+	many := make([]SeqRange, 500)
+	if r, _ := ParseNack(AppendNack(nil, 1, 1, many)); len(r) != MaxNackRanges {
+		t.Fatalf("ranges not capped: %d", len(r))
+	}
+}

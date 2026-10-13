@@ -64,6 +64,6 @@ Links: eth 26 ms / 120 Mbit; Wi-Fi 46 ms / 80 Mbit / 0.5% loss each way; USB 100
 | Mode | Throughput (steady) |
 |---|---|
 | Smart / Speed / Mirror | ~106 Mbit/s, which is the fastest path's ceiling after header overhead. All intact. |
-| Wi-Fi alone | ~3.4 Mbit/s. That's the Mathis limit for TCP at ~1% loss; it's not a Bond007 bottleneck. |
+| Wi-Fi alone | ~3.4 Mbit/s. That's the Mathis limit for TCP at ~1% loss; it's not a Net-Bond-007 bottleneck. |
 | Wi-Fi + USB mirrored | ~13 Mbit/s, about 4× the single lossy link, because redundancy hides random loss. |
 | Ethernet pulled mid-transfer | completes intact; the remaining lossy links then limit TCP as above. |

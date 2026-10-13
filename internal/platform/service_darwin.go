@@ -10,19 +10,19 @@ import (
 	"path/filepath"
 )
 
-const plistPath = "/Library/LaunchDaemons/com.bond007.client.plist"
+const plistPath = "/Library/LaunchDaemons/com.net-bond-007.client.plist"
 
 const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key><string>com.bond007.client</string>
+	<key>Label</key><string>com.net-bond-007.client</string>
 	<key>ProgramArguments</key>
 	<array><string>%s</string><string>run</string><string>--config</string><string>%s</string></array>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>/var/log/bond007.log</string>
-	<key>StandardErrorPath</key><string>/var/log/bond007.log</string>
+	<key>StandardOutPath</key><string>/var/log/net-bond-007.log</string>
+	<key>StandardErrorPath</key><string>/var/log/net-bond-007.log</string>
 </dict>
 </plist>
 `
@@ -33,7 +33,7 @@ func InstallService(cfgPath string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("install needs administrator rights: run with sudo")
 	}
-	dst := "/usr/local/bin/bond007"
+	dst := "/usr/local/bin/net-bond-007"
 	if err := copySelf(dst); err != nil {
 		return err
 	}
@@ -41,14 +41,14 @@ func InstallService(cfgPath string) error {
 	if err := os.WriteFile(plistPath, []byte(fmt.Sprintf(plist, dst, cfgPath)), 0o644); err != nil {
 		return err
 	}
-	exec.Command("launchctl", "bootout", "system/com.bond007.client").Run()
+	exec.Command("launchctl", "bootout", "system/com.net-bond-007.client").Run()
 	return run("launchctl", "bootstrap", "system", plistPath)
 }
 
 func UninstallService() error {
-	exec.Command("launchctl", "bootout", "system/com.bond007.client").Run()
+	exec.Command("launchctl", "bootout", "system/com.net-bond-007.client").Run()
 	os.Remove(plistPath)
-	os.Remove("/usr/local/bin/bond007")
+	os.Remove("/usr/local/bin/net-bond-007")
 	return nil
 }
 

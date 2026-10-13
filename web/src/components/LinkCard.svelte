@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { LinkView } from '../lib/types'
-  import { bps, ms, pct, kindColor, kindLabel, stateTone, displayName } from '../lib/format'
+  import { bps, bytes, ms, pct, kindColor, kindLabel, stateTone, displayName } from '../lib/format'
   import KindIcon from './KindIcon.svelte'
   import Gauge from './Gauge.svelte'
   import Sparkline from './Sparkline.svelte'
@@ -19,7 +19,11 @@
       <b>{displayName(link)}</b>
       <span>{kindLabel[link.kind] ?? link.kind}{link.label ? ` · ${link.name}` : ''}{link.local ? ` · ${link.local}` : ''}</span>
     </div>
-    <span class="chip {stateTone(link.state)}"><span class="dot" class:live={link.state === 'up'}></span>{link.state}</span>
+    {#if link.benched}
+      <span class="chip warn" title="Automatic scaling stopped using this link because it keeps failing. It is still monitored and rejoins when reliable again.">benched</span>
+    {:else}
+      <span class="chip {stateTone(link.state)}"><span class="dot" class:live={link.state === 'up'}></span>{link.state}</span>
+    {/if}
   </div>
 
   <div class="body">
@@ -46,9 +50,20 @@
     </div>
     <span class="win"><b class="num">{pct(winRatio * 100, 0)}</b> races won</span>
     <span class="sep"></span>
+    {#if link.reliability !== undefined}
+      <span class="kv" title="Long-run delivery score used by automatic scaling">reliability <b class="num" class:bad={link.reliability < 0.75}>{pct(link.reliability * 100, 0)}</b></span>
+    {/if}
     <span class="kv">loss <b class="num" class:bad={link.lossPct > 3}>{pct(link.lossPct)}</b></span>
     <span class="kv">jitter <b class="num">{ms(link.jitterMs)}</b></span>
+    {#if link.tested}
+      <span class="kv" title="Last stand-alone speed test of this connection ({new Date(link.tested.at).toLocaleString()})">tested <b class="num">{bps(link.tested.downBps, 0)}↓ {bps(link.tested.upBps, 0)}↑</b></span>
+    {/if}
     {#if link.backup}<span class="chip">backup</span>{/if}
+    {#if link.metered}
+      <span class="chip info" title={link.meterShare ? `Carries up to ${Math.round(link.meterShare * 100)}% while other links work; everything when they fail` : 'Failover only while other links work'}>
+        metered{link.usage ? ` · ${bytes(link.usage.usedBytes)}${link.usage.capBytes ? ' / ' + bytes(link.usage.capBytes) : ''}` : ''}
+      </span>
+    {/if}
   </div>
   {#if link.lastError && link.state !== 'up'}<div class="err">{link.lastError}</div>{/if}
 </button>

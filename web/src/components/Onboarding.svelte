@@ -20,7 +20,7 @@
   <div class="blob"></div>
   <div class="txt">
     <span class="chip accent">Step 1 of 1</span>
-    <h1>Point Bond007 at your server</h1>
+    <h1>Point Net-Bond-007 at your server</h1>
     <p>Every network this device can see joins the bond automatically. Ethernet, Wi-Fi, a tethered phone and more all act as one faster, more reliable connection.</p>
   </div>
   <form onsubmit={go}>

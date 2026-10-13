@@ -217,17 +217,28 @@ func (p *Pacer) Govern(now time.Time, srtt, minRTT time.Duration, loss, delivere
 	// Loss alone is a weak signal (Wi-Fi and cellular lose packets at
 	// random), so it only counts when it is heavy.
 	base := p.baseRTT(now, srtt)
+	// The sliding baseline follows real path changes (a new satellite adds
+	// tens of ms) but must not absorb sustained queueing of seconds, or
+	// flooding a slow link would come to look normal.
+	if minRTT > 0 {
+		base = min(base, minRTT+max(minRTT, 150*time.Millisecond))
+	}
 	inflation := srtt - base
 	dth := p.delayThresh
 	if dth <= 0 {
 		dth = 15 * time.Millisecond
 	}
-	threshold := max(dth, base/2, 2*p.jitter)
+	// Allow for the path's own jitter, but cap it: on a slow link, huge
+	// "jitter" is usually our own queue (we are flooding it), not the path.
+	threshold := max(dth, base/2, min(2*p.jitter, 100*time.Millisecond))
 	lth := p.lossThresh
 	if lth <= 0 {
 		lth = 0.10
 	}
-	congested := inflation > threshold || loss > lth
+	// Latency several times the path's base is a full buffer, whatever the
+	// jitter says.
+	bloated := srtt > 3*base && inflation > 100*time.Millisecond
+	congested := inflation > threshold || loss > lth || bloated
 	// Delivery-rate check (as in BBR): if we keep sending clearly more than
 	// arrives, a queue is growing or the link is dropping, even before the
 	// RTT shows it. Measurements lag by up to a second, so require the
@@ -250,9 +261,14 @@ func (p *Pacer) Govern(now time.Time, srtt, minRTT time.Duration, loss, delivere
 	congested = p.congStreak >= 2
 	switch {
 	case congested:
-		// Back off at most once per RTT-ish interval.
-		if now.Sub(p.lastDown) > max(2*srtt, 100*time.Millisecond) {
+		// Back off at most once per RTT-ish interval (capped: on a bloated
+		// link the RTT itself is seconds long).
+		if now.Sub(p.lastDown) > min(max(2*srtt, 100*time.Millisecond), 500*time.Millisecond) {
 			p.rate *= 0.8
+			// Far more sent than arrives: jump to about what actually arrives.
+			if !p.shortSince.IsZero() && delivered > 0 && delivered < 0.5*p.rate {
+				p.rate = 1.1 * delivered
+			}
 			p.lastDown = now
 			p.learned = true
 		}
@@ -269,7 +285,9 @@ func (p *Pacer) Govern(now time.Time, srtt, minRTT time.Duration, loss, delivere
 		// kept through idle periods.
 		ceiling := max(p.startRate, 1.5*p.useRate)
 		if delivered > 0 {
-			ceiling = min(ceiling, max(p.startRate, 1.4*delivered))
+			// What the link actually delivers caps growth, even below the
+			// start rate: a 1.2 Mbit Wi-Fi must not be fed 20 Mbit of copies.
+			ceiling = min(ceiling, max(minPaceRate, 1.4*delivered))
 		}
 		if target > ceiling {
 			target = max(p.rate, ceiling)

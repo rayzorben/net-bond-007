@@ -252,3 +252,36 @@ func TestPacerAdaptsToNewBaseRTT(t *testing.T) {
 		t.Fatalf("permanent base-RTT shift treated as congestion: %.1f -> %.1f", before/1e6, p.Rate()/1e6)
 	}
 }
+
+// Field regression (campground Wi-Fi, ~1.2 Mbit): mirrored copies drove its
+// RTT from ~50ms to seconds, and the jitter allowance hid it. The pacer must
+// back off toward what the link delivers.
+func TestPacerBacksOffSlowLinkDespiteHugeJitter(t *testing.T) {
+	var p Pacer
+	p.Configure(true, 20e6, 0)
+	now := time.Now()
+	rtt := 50 * time.Millisecond
+	for i := 0; i < 80; i++ { // 20s of flooding a 1.2 Mbit link
+		now = offer(&p, now, 250*time.Millisecond, 40e6)
+		// Queue grows: RTT climbs and swings wildly, loss is moderate.
+		rtt = min(rtt+60*time.Millisecond, 4*time.Second)
+		p.Govern(now, rtt+time.Duration(i%3)*300*time.Millisecond, 50*time.Millisecond, 0.08, 1.2e6)
+	}
+	if r := p.Rate(); r > 3e6 {
+		t.Fatalf("pacer still feeding %.1f Mbit into a 1.2 Mbit link", r/1e6)
+	}
+}
+
+// Growth is capped by delivery even below the configured start rate.
+func TestPacerDeliveryCapBelowStartRate(t *testing.T) {
+	var p Pacer
+	p.Configure(true, 20e6, 0)
+	now := time.Now()
+	for i := 0; i < 40; i++ {
+		now = offer(&p, now, 250*time.Millisecond, 40e6)
+		p.Govern(now, 50*time.Millisecond, 50*time.Millisecond, 0, 1.2e6) // link delivers 1.2 Mbit
+	}
+	if r := p.Rate(); r > 2e6 {
+		t.Fatalf("pacer at %.1f Mbit for a link delivering 1.2", r/1e6)
+	}
+}

@@ -1,4 +1,4 @@
-// Package server is the Bond007 aggregation endpoint. It accepts every link of
+// Package server is the Net-Bond-007 aggregation endpoint. It accepts every link of
 // every client on one UDP socket, de-duplicates upstream packets (first copy
 // wins), forwards them to the internet through the userspace gateway and
 // schedules responses back over the client's links per the client's policy.
@@ -15,16 +15,19 @@ import (
 	"net/netip"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/rayzorben/bond007/internal/bond"
-	"github.com/rayzorben/bond007/internal/config"
-	"github.com/rayzorben/bond007/internal/netstack"
-	"github.com/rayzorben/bond007/internal/proto"
-	"github.com/rayzorben/bond007/internal/sched"
-	"github.com/rayzorben/bond007/internal/webui"
+	"github.com/rayzorben/net-bond-007/internal/bond"
+	"github.com/rayzorben/net-bond-007/internal/config"
+	"github.com/rayzorben/net-bond-007/internal/names"
+	"github.com/rayzorben/net-bond-007/internal/netstack"
+	"github.com/rayzorben/net-bond-007/internal/proto"
+	"github.com/rayzorben/net-bond-007/internal/sched"
+	"github.com/rayzorben/net-bond-007/internal/webui"
 )
 
 var Version = "dev"
@@ -47,7 +50,92 @@ type Server struct {
 	started time.Time
 	closed  chan struct{}
 
-	Rejected atomic.Uint64
+	Rejected  atomic.Uint64
+	names     names.Cache
+	hist      *Recorder
+	lastSamp  time.Time
+	lastPrune time.Time
+}
+
+// EnableHistory starts recording history under dir.
+func (s *Server) EnableHistory(dir string) error {
+	r, err := NewRecorder(dir)
+	if err != nil {
+		return err
+	}
+	s.hist = r
+	return nil
+}
+
+func (s *Server) event(ss *Session, msg string) {
+	if s.hist == nil || !s.cfg.Get().History.Enabled {
+		return
+	}
+	s.hist.Write(Record{T: time.Now().UnixMilli(), Kind: "event", Client: ss.Name, Session: fmt.Sprintf("%08x", ss.ID), Event: msg})
+}
+
+// recordConns writes a summary of each ended connection (server view: what
+// it sends is the client's download).
+func (s *Server) recordConns(ss *Session, fs []bond.FlowView) {
+	if s.hist == nil || !s.cfg.Get().History.Enabled {
+		return
+	}
+	for _, f := range fs {
+		secs := float64(f.Last-f.First) / 1000
+		hc := &HistConn{Host: f.Name, Outside: f.Outside, Proto: f.Proto, DownBytes: f.TxBytes, UpBytes: f.RxBytes,
+			Seconds: secs, PeakDown: f.PeakTx, Links: map[string]float64{}}
+		if hc.Host == "" {
+			hc.Host = s.names.Lookup(f.Key.Outside.Addr())
+		}
+		if secs > 0 {
+			hc.AvgDown = float64(f.TxBytes) * 8 / secs
+		}
+		var total uint64
+		for _, l := range f.Links {
+			total += l.Copies
+		}
+		for _, l := range f.Links {
+			if total > 0 {
+				hc.Links[l.Name] = float64(l.Copies) / float64(total)
+			}
+		}
+		s.hist.Write(Record{T: f.Last, Kind: "conn", Client: ss.Name, Session: fmt.Sprintf("%08x", ss.ID), Conn: hc})
+	}
+}
+
+// sample records one history point per session.
+func (s *Server) sample(now time.Time) {
+	cfg := s.cfg.Get().History
+	if s.hist == nil || !cfg.Enabled || now.Sub(s.lastSamp) < time.Duration(cfg.SampleSec)*time.Second {
+		return
+	}
+	s.lastSamp = now
+	s.mu.RLock()
+	list := make([]*Session, 0, len(s.sessions))
+	for _, ss := range s.sessions {
+		list = append(list, ss)
+	}
+	s.mu.RUnlock()
+	for _, ss := range list {
+		ss.policyMu.Lock()
+		mode := ss.policy.AutoMode
+		ss.policyMu.Unlock()
+		ev := ss.Engine.View()
+		if mode == "" {
+			mode = ev.Mode
+		}
+		hs := &HistSample{Mode: mode, Copies: ev.Redundancy, DownBps: ev.TxBps, UpBps: ev.RxBps, Retransmits: ev.Retransmits}
+		for _, l := range ss.Engine.Links() {
+			v := l.View(0)
+			hs.Links = append(hs.Links, HistLink{Name: v.Name, Kind: v.Kind, State: v.State, RTT: v.RTTms, Loss: v.LossPct,
+				DownBps: v.TxBps, UpBps: v.RxBps, Benched: v.Benched})
+		}
+		s.hist.Write(Record{T: now.UnixMilli(), Kind: "sample", Client: ss.Name, Session: fmt.Sprintf("%08x", ss.ID), Sample: hs})
+	}
+	if now.Sub(s.lastPrune) > time.Hour {
+		s.hist.Prune(cfg.RetentionDays)
+		s.lastPrune = now
+	}
 }
 
 // Session is one client device and its bonded links.
@@ -156,6 +244,7 @@ func (s *Server) rebind(addr string) error {
 }
 
 func (s *Server) Close() {
+	defer s.hist.Close()
 	close(s.closed)
 	if lns := s.lns.Load(); lns != nil {
 		for _, pc := range *lns {
@@ -236,7 +325,11 @@ func (s *Server) handle(f []byte, from pkt) {
 			return
 		}
 		l.Rx.Add(len(f))
+		before := l.State()
 		s.applyProbe(l, p)
+		if after := l.State(); after != before && before != bond.StateConnecting {
+			s.event(ss, fmt.Sprintf("link %s %s → %s", l.Name, before, after))
+		}
 		ack := proto.AppendProbeAck(nil, ss.ID, l.ID, proto.ProbeAck{
 			Seq: p.Seq, SentAt: p.SentAt,
 			RxPackets: l.Rx.Packets.Load(), RxBytes: l.Rx.Bytes.Load(),
@@ -246,10 +339,17 @@ func (s *Server) handle(f []byte, from pkt) {
 		var p proto.Policy
 		if proto.ParseJSON(f, &p) == nil {
 			ss.policyMu.Lock()
+			old := ss.policy
 			ss.policy = p
 			ss.policyMu.Unlock()
 			s.applyPolicy(ss)
+			if p.AutoMode != old.AutoMode || p.AutoDirectVia != old.AutoDirectVia || fmt.Sprint(p.Benched) != fmt.Sprint(old.Benched) {
+				s.event(ss, autoEvent(ss, p))
+			}
 		}
+	case proto.TypeNack:
+		l.Rx.Add(len(f))
+		ss.Engine.HandleNack(f)
 	case proto.TypeBye:
 		ss.Engine.RemoveLink(l.ID)
 		ss.paths.Delete(l.ID)
@@ -296,10 +396,13 @@ func (s *Server) hello(f []byte, h proto.Header, from pkt) {
 		}
 		ss.Engine = bond.New(h.Session, s.fromClient(ss))
 		ss.Engine.SetHistory(cfg.Sessions.HistorySeconds)
+		sess := ss
+		ss.Engine.SetFlowSink(func(fs []bond.FlowView) { s.recordConns(sess, fs) })
 		ss.Engine.SetQueueDepth(cfg.Sessions.DefaultQueue)
 		s.sessions[ss.ID] = ss
 		s.byIP[ip] = ss
 		s.log.Info("client connected", "client", hello.ClientName, "session", fmt.Sprintf("%08x", ss.ID), "ip", ip, "os", hello.OS)
+		defer s.event(ss, fmt.Sprintf("client connected (v%s, %s, tunnel %s)", hello.Version, hello.OS, ip))
 	}
 	s.mu.Unlock()
 	ss.lastSeen.Store(time.Now().UnixNano())
@@ -313,6 +416,7 @@ func (s *Server) hello(f []byte, h proto.Header, from pkt) {
 		l.SetState(bond.StateConnecting)
 		l.Health(func(hh *bond.Health) { hh.RemoteAddr = from.from.String() })
 		s.log.Info("link joined", "client", ss.Name, "link", hello.LinkName, "kind", hello.LinkKind, "from", from.from)
+		s.event(ss, fmt.Sprintf("link %s (%s) joined from %s", hello.LinkName, hello.LinkKind, from.from))
 	}
 	l.LastRx.Store(time.Now().UnixNano())
 	ss.updateAddr(l, from)
@@ -408,6 +512,7 @@ func (s *Server) applyProbe(l *bond.Link, p proto.Probe) {
 		recent = (srtt + last) / 2 // react faster than the smoothed value
 	}
 	l.Pacer.Govern(time.Now(), recent, minRTT, loss, float64(p.RxKbps)*1000)
+	l.Shaper.Observe(time.Now(), float64(p.RxKbps)*1000)
 	l.SetOneWayDelay(srtt / 2)
 }
 
@@ -427,9 +532,25 @@ func (s *Server) applyPolicy(ss *Session) {
 	for _, l := range ss.Engine.Links() {
 		l.Pacer.Configure(p.Pacing, float64(max(p.PacingStartMbps, 1))*1e6, p.LinkMaxMbps[l.ID]*1e6)
 		l.Pacer.Tuning(time.Duration(p.PacingDelayMs)*time.Millisecond, float64(p.PacingLossPct)/100)
+		l.Shaper.Configure(p.Shaping)
+	}
+	ss.Engine.SetARQ(p.Retransmit)
+	red := max(p.Redundancy, 1)
+	if p.AutoCopies > 0 && mode == sched.ModeSmart {
+		// The client's automatic scaling decided the copies.
+		mode, red = sched.ModeCustom, p.AutoCopies
+	}
+	benched := map[uint8]bool{}
+	for _, id := range p.Benched {
+		benched[id] = true
+	}
+	for _, l := range ss.Engine.Links() {
+		l.SetBenched(benched[l.ID])
+		share, metered := p.MeteredShare[l.ID]
+		l.SetMetered(metered, share)
 	}
 	ss.Engine.SetPolicy(sched.Policy{
-		Mode: mode, Strategy: sched.Strategy(p.Strategy), Redundancy: max(p.Redundancy, 1),
+		Mode: mode, Strategy: sched.Strategy(p.Strategy), Redundancy: red,
 		SmallPacketMirrorBytes: p.SmallPacketMirrorBytes,
 		RealtimeMirror:         p.RealtimeMirror,
 		RealtimePorts:          ports,
@@ -480,7 +601,11 @@ func (ss *Session) reorderHold() time.Duration {
 		if maxHold == 0 {
 			maxHold = 60 * time.Millisecond
 		}
-		return ss.Engine.AutoReorderHold(maxHold)
+		hold := ss.Engine.AutoReorderHold(maxHold)
+		if ss.Engine.ARQ() {
+			hold = ss.Engine.ARQHold(maxHold)
+		}
+		return hold
 	}
 }
 
@@ -519,6 +644,7 @@ func (s *Server) tick(now time.Time) {
 		ss.Engine.Tick(now)
 	}
 	s.mu.RUnlock()
+	s.sample(now)
 	for _, ss := range expired {
 		s.mu.Lock()
 		delete(s.sessions, ss.ID)
@@ -527,6 +653,7 @@ func (s *Server) tick(now time.Time) {
 		s.mu.Unlock()
 		ss.Engine.Close()
 		s.log.Info("client session expired", "client", ss.Name, "session", fmt.Sprintf("%08x", ss.ID))
+		s.event(ss, "client session ended (idle)")
 	}
 }
 
@@ -545,14 +672,15 @@ type SessionView struct {
 }
 
 type StateView struct {
-	Role     string         `json:"role"`
-	Uptime   float64        `json:"uptime"`
-	Listen   string         `json:"listen"`
-	Gateway  string         `json:"gateway"`
-	Sessions []SessionView  `json:"sessions"`
-	Egress   map[string]any `json:"egress"`
-	Rejected uint64         `json:"rejected"`
-	Warnings []string       `json:"warnings"`
+	Role     string            `json:"role"`
+	Uptime   float64           `json:"uptime"`
+	Listen   string            `json:"listen"`
+	Gateway  string            `json:"gateway"`
+	Sessions []SessionView     `json:"sessions"`
+	Egress   map[string]any    `json:"egress"`
+	TCP      map[string]uint64 `json:"tcp"`
+	Rejected uint64            `json:"rejected"`
+	Warnings []string          `json:"warnings"`
 }
 
 func (s *Server) Snapshot(history int) StateView {
@@ -570,6 +698,7 @@ func (s *Server) Snapshot(history int) StateView {
 			"bytesUp": st.BytesUp.Load(), "bytesDown": st.BytesDown.Load(),
 		},
 		Rejected: s.Rejected.Load(),
+		TCP:      s.gw.TCPStats(),
 		Sessions: []SessionView{},
 		Warnings: []string{},
 	}
@@ -619,6 +748,65 @@ func (b Backend) RefreshInterval() time.Duration {
 	return time.Duration(b.S.cfg.Get().UI.RefreshMs) * time.Millisecond
 }
 func (b Backend) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/x/history", func(w http.ResponseWriter, r *http.Request) {
+		hours, _ := strconv.ParseFloat(r.URL.Query().Get("hours"), 64)
+		if hours <= 0 {
+			hours = 6
+		}
+		to := time.Now()
+		from := to.Add(-time.Duration(hours * float64(time.Hour)))
+		samples, events, conns := b.S.hist.Query(from, to, r.URL.Query().Get("client"), 600)
+		if len(conns) > 2000 {
+			conns = conns[:2000]
+		}
+		if len(events) > 1000 {
+			events = events[:1000]
+		}
+		clients := map[string]bool{}
+		for _, x := range samples {
+			clients[x.Client] = true
+		}
+		names := []string{}
+		for c := range clients {
+			names = append(names, c)
+		}
+		sort.Strings(names)
+		webui.WriteJSON(w, http.StatusOK, map[string]any{
+			"enabled": b.S.hist != nil && b.S.cfg.Get().History.Enabled, "from": from.UnixMilli(), "to": to.UnixMilli(),
+			"clients": names, "samples": nonNil(samples), "events": nonNil(events), "connections": nonNil(conns),
+		})
+	})
+	mux.HandleFunc("GET /api/x/connections", func(w http.ResponseWriter, r *http.Request) {
+		type conn struct {
+			bond.FlowView
+			Host string `json:"host,omitempty"`
+		}
+		type sess struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			IP          string `json:"ip"`
+			Connections []conn `json:"connections"`
+		}
+		out := []sess{}
+		b.S.mu.RLock()
+		list := make([]*Session, 0, len(b.S.sessions))
+		for _, ss := range b.S.sessions {
+			list = append(list, ss)
+		}
+		b.S.mu.RUnlock()
+		for _, ss := range list {
+			sv := sess{ID: fmt.Sprintf("%08x", ss.ID), Name: ss.Name, IP: ss.IP.String(), Connections: []conn{}}
+			for _, f := range ss.Engine.Flows() {
+				c := conn{FlowView: f, Host: f.Name}
+				if c.Host == "" {
+					c.Host = b.S.names.Lookup(f.Key.Outside.Addr())
+				}
+				sv.Connections = append(sv.Connections, c)
+			}
+			out = append(out, sv)
+		}
+		webui.WriteJSON(w, http.StatusOK, map[string]any{"sessions": out})
+	})
 	mux.HandleFunc("POST /api/x/sessions/{id}/kick", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		b.S.mu.Lock()
@@ -633,4 +821,34 @@ func (b Backend) Routes(mux *http.ServeMux) {
 		b.S.mu.Unlock()
 		webui.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
+}
+
+func nonNil(r []Record) []Record {
+	if r == nil {
+		return []Record{}
+	}
+	return r
+}
+
+func autoEvent(ss *Session, p proto.Policy) string {
+	if p.AutoMode == "" {
+		return "automatic scaling off (mode " + p.Mode + ")"
+	}
+	msg := "automatic scaling: " + p.AutoMode
+	if p.AutoDirectVia != "" {
+		msg += " via " + p.AutoDirectVia
+	}
+	msg += fmt.Sprintf(" (%d copies", p.AutoCopies)
+	if len(p.Benched) > 0 {
+		var ns []string
+		for _, id := range p.Benched {
+			if l := ss.Engine.Link(id); l != nil {
+				ns = append(ns, l.Name)
+			} else {
+				ns = append(ns, fmt.Sprint(id))
+			}
+		}
+		msg += ", benched: " + strings.Join(ns, ", ")
+	}
+	return msg + ")"
 }

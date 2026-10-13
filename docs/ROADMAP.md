@@ -16,7 +16,7 @@
 
 ## Platform notes
 
-- **Windows:** the Wintun driver (signed by WireGuard LLC, v0.14.1) is embedded in the exe and extracted next to it. The exe self-elevates to install itself as an auto-start service with restart-on-failure. Settings and logs live in `C:\ProgramData\Bond007\`.
+- **Windows:** the Wintun driver (signed by WireGuard LLC, v0.14.1) is embedded in the exe and extracted next to it. The exe self-elevates to install itself as an auto-start service with restart-on-failure. Settings and logs live in `C:\ProgramData\Net-Bond-007\`.
 - **macOS:** uses a utun device and a launchd daemon. The binary is unsigned, so the installer removes the quarantine attribute.
 - **Linux:** systemd unit. Needs `iproute2`, which is present everywhere.
 - **OpenWrt:** procd service, uci firewall zone, `kmod-tun` dependency. Uses busybox or full `ip`, and `nft` or `iptables`.

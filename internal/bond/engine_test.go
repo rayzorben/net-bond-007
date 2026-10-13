@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rayzorben/bond007/internal/sched"
+	"github.com/rayzorben/net-bond-007/internal/proto"
+	"github.com/rayzorben/net-bond-007/internal/sched"
 )
 
 // simPath delivers frames from one engine to another with latency and loss.
@@ -387,5 +388,215 @@ func TestPrimaryCopyIgnoresPacingDebt(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	if sent[0].Load() != 200 || sent[1].Load() != 0 {
 		t.Fatalf("primary copies went to the slow link: fast=%d slow=%d", sent[0].Load(), sent[1].Load())
+	}
+}
+
+// duplex wires two engines with one lossy, delayed path in each direction
+// and dispatches DATA and NACK frames like the real client/server do.
+func duplex(t *testing.T, delay time.Duration, loss float64) (a, b *Engine, got *collector) {
+	t.Helper()
+	got = &collector{}
+	a = New(1, func([]byte) {})
+	b = New(1, got.deliver)
+	rng := rand.New(rand.NewSource(11))
+	var mu sync.Mutex
+	var la, lb *Link
+	path := func(dst *Engine, dstLink func() *Link) func([]byte) error {
+		return func(f []byte) error {
+			mu.Lock()
+			drop := rng.Float64() < loss
+			mu.Unlock()
+			if drop {
+				return nil
+			}
+			c := append([]byte(nil), f...)
+			time.AfterFunc(delay, func() {
+				h, err := proto.ParseHeader(c)
+				if err != nil {
+					return
+				}
+				switch h.Type {
+				case proto.TypeData:
+					dst.Receive(dstLink(), c)
+				case proto.TypeNack:
+					dst.HandleNack(c)
+				}
+			})
+			return nil
+		}
+	}
+	la = a.AddLink(1, "l", "sim", path(b, func() *Link { return lb }))
+	lb = b.AddLink(1, "l", "sim", path(a, func() *Link { return la }))
+	for _, l := range []*Link{la, lb} {
+		l.SetState(StateUp)
+		l.SetOneWayDelay(delay)
+		l.Health(func(h *Health) { h.RTT.Update(2 * delay) })
+	}
+	t.Cleanup(func() { a.Close(); b.Close() })
+	return a, b, got
+}
+
+func TestARQRecoversLossTransparently(t *testing.T) {
+	a, b, got := duplex(t, 20*time.Millisecond, 0.05)
+	a.SetARQ(true)
+	b.SetARQ(true)
+	b.SetReorderHold(b.ARQHold(400 * time.Millisecond))
+	const n = 2000
+	for i := uint32(1); i <= n; i++ {
+		a.Send(fakePkt(i))
+		if i%50 == 0 {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(got.snapshot()) < n {
+		time.Sleep(20 * time.Millisecond)
+	}
+	seqs := got.snapshot()
+	if missing := n - len(seqs); missing > n/200 { // <0.5% left vs 5% raw loss
+		t.Fatalf("ARQ left %d of %d packets missing (raw loss 5%%); retransmits=%d nacks=%d",
+			missing, n, a.Retransmits.Load(), b.NacksSent.Load())
+	}
+	// A repair that itself needed a second NACK round can land after the
+	// reorder hold gave up: delivered slightly out of order, which TCP
+	// tolerates. It must stay rare.
+	inversions := 0
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] < seqs[i-1] {
+			inversions++
+		}
+	}
+	if inversions > n/100 {
+		t.Fatalf("%d out-of-order deliveries (>1%%)", inversions)
+	}
+	if a.Retransmits.Load() == 0 || b.NacksSent.Load() == 0 {
+		t.Fatal("no retransmissions happened")
+	}
+	t.Logf("delivered %d/%d, out-of-order %d, retransmits=%d, nacks=%d", len(seqs), n, inversions, a.Retransmits.Load(), b.NacksSent.Load())
+}
+
+func TestARQOffMeansNoNacks(t *testing.T) {
+	a, b, got := duplex(t, 5*time.Millisecond, 0.05)
+	for i := uint32(1); i <= 500; i++ {
+		a.Send(fakePkt(i))
+	}
+	time.Sleep(200 * time.Millisecond)
+	if b.NacksSent.Load() != 0 || a.Retransmits.Load() != 0 {
+		t.Fatal("ARQ activity while disabled")
+	}
+	if l := len(got.snapshot()); l > 490 {
+		t.Fatalf("expected visible loss without ARQ, delivered %d/500", l)
+	}
+}
+
+// Field regression: a slow link that only carries duplicates must not set the
+// reorder hold (it made every gap wait ~300ms and triggered spurious TCP
+// timeouts at the far end).
+func TestReorderHoldIgnoresDuplicateOnlyLinks(t *testing.T) {
+	e := New(1, func([]byte) {})
+	defer e.Close()
+	fast := e.AddLink(1, "starlink", "sim", func([]byte) error { return nil })
+	slow := e.AddLink(2, "campground", "sim", func([]byte) error { return nil })
+	for _, l := range []*Link{fast, slow} {
+		l.SetState(StateUp)
+	}
+	fast.Health(func(h *Health) { h.RTT.Update(80 * time.Millisecond); h.WinShare = 0.99 })
+	slow.Health(func(h *Health) { h.RTT.Update(990 * time.Millisecond); h.WinShare = 0.0 })
+	if d := e.AutoReorderHold(300 * time.Millisecond); d > 50*time.Millisecond {
+		t.Fatalf("hold %v driven by a duplicate-only link", d)
+	}
+	fast.SetOneWayDelay(40 * time.Millisecond)
+	slow.SetOneWayDelay(495 * time.Millisecond)
+	// ARQ hold covers ~2.5 RTTs of the fast path (repair incl. a retry),
+	// independent of the slow link, and respects the configured cap.
+	if d := e.ARQHold(2 * time.Second); d < 200*time.Millisecond || d > 320*time.Millisecond {
+		t.Fatalf("ARQ hold %v, want ~2.5 x 80ms RTT + margins", d)
+	}
+	if d := e.ARQHold(150 * time.Millisecond); d != 150*time.Millisecond {
+		t.Fatalf("cap not applied: %v", d)
+	}
+}
+
+// Field regression (Starlink + 5s campground Wi-Fi): the Wi-Fi wins a few
+// races only when Starlink drops a packet. It must not stretch the NACK wait
+// (it pushed the wait to ~2.5s, so every repair arrived after the hold).
+func TestNackWaitIgnoresSlowBackupWinners(t *testing.T) {
+	e := New(1, func([]byte) {})
+	defer e.Close()
+	star := e.AddLink(1, "eth0", "sim", func([]byte) error { return nil })
+	wifi := e.AddLink(2, "sta0", "sim", func([]byte) error { return nil })
+	star.SetState(StateUp)
+	wifi.SetState(StateDegraded)
+	star.SetOneWayDelay(47 * time.Millisecond)
+	wifi.SetOneWayDelay(2500 * time.Millisecond)
+	star.Health(func(h *Health) {
+		h.RTT.Update(95 * time.Millisecond)
+		h.RTT.Update(90 * time.Millisecond)
+		h.WinShare = 0.95
+	})
+	wifi.Health(func(h *Health) { h.RTT.Update(5 * time.Second); h.WinShare = 0.05 })
+	wait, _ := e.nackTiming(time.Now())
+	if wait > 60*time.Millisecond {
+		t.Fatalf("NACK wait %v stretched by the slow backup link", wait)
+	}
+	if hold := e.ARQHold(400 * time.Millisecond); wait+95*time.Millisecond > hold {
+		t.Fatalf("repair (wait %v + RTT) cannot arrive within hold %v", wait, hold)
+	}
+}
+
+// Metered phone link: in mirror mode it carries only its share (10%) of
+// traffic; when the main link dies it carries everything (failover first).
+func TestMeteredLinkShareAndFailover(t *testing.T) {
+	e := New(1, func([]byte) {})
+	defer e.Close()
+	var sent [2]atomic.Int64
+	star := e.AddLink(1, "eth0", "sim", func([]byte) error { sent[0].Add(1); return nil })
+	phone := e.AddLink(2, "eth3", "sim", func([]byte) error { sent[1].Add(1); return nil })
+	star.SetState(StateUp)
+	phone.SetState(StateUp)
+	star.SetOneWayDelay(40 * time.Millisecond)
+	phone.SetOneWayDelay(55 * time.Millisecond)
+	phone.SetMetered(true, 0.10)
+	e.SetPolicy(sched.Policy{Mode: sched.ModeMirror})
+	const n = 3000
+	for i := uint32(0); i < n; i++ {
+		e.Send(fakePkt(i))
+	}
+	time.Sleep(50 * time.Millisecond)
+	share := float64(sent[1].Load()) / n
+	if sent[0].Load() != n || share < 0.07 || share > 0.13 {
+		t.Fatalf("mirror with metered phone: starlink %d/%d, phone share %.2f (want ~0.10)", sent[0].Load(), n, share)
+	}
+	// Cap reached: failover only (share 0) -> no copies while Starlink works.
+	phone.SetMetered(true, 0)
+	before := sent[1].Load()
+	for i := uint32(0); i < 500; i++ {
+		e.Send(fakePkt(i))
+	}
+	time.Sleep(30 * time.Millisecond)
+	if sent[1].Load() != before {
+		t.Fatalf("over-cap phone still got %d copies", sent[1].Load()-before)
+	}
+	// Starlink barely working (a trickle): not a real alternative, so the
+	// phone carries traffic regardless of its share.
+	star.Pacer.Configure(true, 1e6, 1e6)
+	before = sent[1].Load()
+	for i := uint32(0); i < 500; i++ {
+		e.Send(fakePkt(i))
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := sent[1].Load() - before; got < 400 {
+		t.Fatalf("trickling starlink: phone carried only %d/500", got)
+	}
+	star.Pacer.Configure(false, 0, 0)
+	// Starlink dies: the phone carries everything despite cap.
+	star.SetState(StateDown)
+	before = sent[1].Load()
+	for i := uint32(0); i < 500; i++ {
+		e.Send(fakePkt(i))
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := sent[1].Load() - before; got != 500 || e.NoLink.Load() != 0 {
+		t.Fatalf("failover: phone carried %d/500, dropped %d", got, e.NoLink.Load())
 	}
 }

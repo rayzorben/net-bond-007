@@ -60,7 +60,7 @@
     <div class="ic"><Terminal size={22} /></div>
     <h2>No clients connected yet</h2>
     <p class="muted">Install the client on a laptop, desktop or router and point it here:</p>
-    <code class="mono">bond007 install --server {host}:{st.listen.split(':').pop()} --token &lt;your token&gt;</code>
+    <code class="mono">net-bond-007 install --server {host}:{st.listen.split(':').pop()} --token &lt;your token&gt;</code>
   </section>
 {/if}
 
@@ -68,8 +68,9 @@
   <section class="sess glass">
     <div class="sh">
       <div>
-        <h2>{s.name} <span class="chip">{s.os}</span> <span class="chip accent">{s.ip}</span></h2>
-        <p class="muted">session {s.id} · v{s.version} · connected {duration((Date.now() - s.created) / 1000)} · mode {s.engine.mode}{s.engine.mode === 'smart' || s.engine.mode === 'custom' ? ` ×${s.engine.redundancy}` : ''}</p>
+        <h2>{s.name} <span class="chip">{s.os}</span> <span class="chip accent">{s.ip}</span>
+          <span class="chip mono" class:warn={s.version !== store.info?.version} title={s.version !== store.info?.version ? `Client runs v${s.version}, server runs v${store.info?.version}` : 'Same version as the server'}>v{s.version}{s.version !== store.info?.version ? ' ⚠' : ''}</span></h2>
+        <p class="muted">session {s.id} · connected {duration((Date.now() - s.created) / 1000)} · mode {s.engine.mode}{s.engine.mode === 'smart' || s.engine.mode === 'custom' ? ` ×${s.engine.redundancy}` : ''}{s.engine.arq ? ` · ${count(s.engine.retransmits)} packets re-sent` : ''}</p>
       </div>
       <button class="btn sm danger" onclick={() => kick(s.id, s.name)}><UserX size={14} />Disconnect</button>
     </div>

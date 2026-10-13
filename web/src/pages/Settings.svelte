@@ -6,6 +6,8 @@
   import Segmented from '../components/Segmented.svelte'
 
   let draft = $state<any>($state.snapshot(store.config))
+  // What this page started from: only fields changed relative to it are saved.
+  let baseline: any = $state.snapshot(store.config)
   let advanced = $state(false)
   let q = $state('')
   let error = $state('')
@@ -27,7 +29,7 @@
     timer = setTimeout(save, 650)
   }
   async function save() {
-    const err = await store.saveConfig($state.snapshot(draft))
+    const err = await store.saveConfig($state.snapshot(draft), baseline)
     if (err) {
       error = err
       saving = 'idle'
@@ -36,12 +38,14 @@
       error = ''
       saving = 'saved'
       draft = $state.snapshot(store.config)
+      baseline = $state.snapshot(store.config)
       setTimeout(() => saving === 'saved' && (saving = 'idle'), 1800)
     }
   }
   function reset() {
     clearTimeout(timer)
     draft = $state.snapshot(store.config)
+    baseline = $state.snapshot(store.config)
     error = ''
     saving = 'idle'
   }

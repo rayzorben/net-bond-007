@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,10 +33,10 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
-	"github.com/rayzorben/bond007/internal/client"
-	"github.com/rayzorben/bond007/internal/config"
-	"github.com/rayzorben/bond007/internal/platform"
-	"github.com/rayzorben/bond007/internal/server"
+	"github.com/rayzorben/net-bond-007/internal/client"
+	"github.com/rayzorben/net-bond-007/internal/config"
+	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/server"
 )
 
 // impair is a UDP relay between one client link and the server.
@@ -97,6 +98,46 @@ func (p *impair) addr() netip.AddrPort { return p.front.LocalAddr().(*net.UDPAdd
 type osStack struct {
 	s  *stack.Stack
 	ep *channel.Endpoint
+	// pktLog, when set, receives a one-line summary of each TCP packet
+	// (debugging stalls).
+	pktLog atomic.Pointer[func(string)]
+}
+
+func tcpSummary(dir string, pkt []byte) string {
+	if len(pkt) < 40 || pkt[9] != 6 {
+		return ""
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	tcp := pkt[ihl:]
+	off := int(tcp[12]>>4) * 4
+	flags := tcp[13]
+	var f string
+	for i, n := range []string{"F", "S", "R", "P", "A"} {
+		if flags&(1<<i) != 0 {
+			f += n
+		}
+	}
+	sack := ""
+	for o := 20; o+1 < off && o < len(tcp); {
+		k := tcp[o]
+		if k == 0 {
+			break
+		}
+		if k == 1 {
+			o++
+			continue
+		}
+		l := int(tcp[o+1])
+		if k == 5 {
+			sack = fmt.Sprintf(" sack%d", (l-2)/8)
+		}
+		if l < 2 {
+			break
+		}
+		o += l
+	}
+	return fmt.Sprintf("%s seq=%d ack=%d len=%d win=%d %s%s", dir, binary.BigEndian.Uint32(tcp[4:]), binary.BigEndian.Uint32(tcp[8:]),
+		len(pkt)-ihl-off, binary.BigEndian.Uint16(tcp[14:]), f, sack)
 }
 
 func newOSStack(t *testing.T, ip netip.Addr, out func([]byte)) *osStack {
@@ -115,6 +156,21 @@ func newOSStack(t *testing.T, ip netip.Addr, out func([]byte)) *osStack {
 	s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}})
 	sack := tcpip.TCPSACKEnabled(true)
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &sack)
+	// Receive buffers like a real OS (Linux tcp_rmem max is 6 MB). gVisor's
+	// small default fills with out-of-order data after a burst of loss and
+	// advertises a zero window, a stall real devices don't have.
+	mod := tcpip.TCPModerateReceiveBufferOption(true)
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &mod)
+	rcv := tcpip.TCPReceiveBufferSizeRangeOption{Min: 4 << 10, Default: 128 << 10, Max: 6 << 20}
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &rcv)
+	// Modern loss recovery, as Linux, Windows and iOS have (RACK); gVisor's
+	// default falls back to slow one-segment-per-RTO recovery after a burst
+	// of loss, which no real client does.
+	rack := tcpip.TCPRecovery(tcpip.TCPRACKLossDetection)
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &rack)
+	cc := tcpip.CongestionControlOption("cubic")
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &cc)
+	self := &osStack{s: s, ep: ep}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); s.Close() })
 	go func() {
@@ -124,15 +180,25 @@ func newOSStack(t *testing.T, ip netip.Addr, out func([]byte)) *osStack {
 				return
 			}
 			v := pb.ToView()
+			if lf := self.pktLog.Load(); lf != nil {
+				if s := tcpSummary("out", v.AsSlice()); s != "" {
+					(*lf)(s)
+				}
+			}
 			out(append([]byte(nil), v.AsSlice()...))
 			v.Release()
 			pb.DecRef()
 		}
 	}()
-	return &osStack{s: s, ep: ep}
+	return self
 }
 
 func (o *osStack) inject(pkt []byte) {
+	if lf := o.pktLog.Load(); lf != nil {
+		if s := tcpSummary("in ", pkt); s != "" {
+			(*lf)(s)
+		}
+	}
 	pb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), pkt...))})
 	o.ep.InjectInbound(ipv4.ProtocolNumber, pb)
 	pb.DecRef()
@@ -200,6 +266,7 @@ func newRig(t *testing.T, links []struct {
 	ccfg.Health.DownAfterMs = 600
 	ccfg.Health.DegradedRTTMs = 2000
 	ccfg.Interfaces.Exclude = ""
+	ccfg.SpeedTest.Enabled = false // fake interfaces: no real-network tests
 	if mutate != nil {
 		mutate(ccfg)
 	}
@@ -324,15 +391,12 @@ func TestBondedDownloadIntegrity(t *testing.T) {
 			used++
 		}
 	}
-	// Smart mode, 4 links: every packet travels on 2 links. With
-	// fastest-arrival scheduling the two fastest carry the copies and
-	// slower links only absorb overflow.
-	if used < 2 {
-		t.Errorf("downstream copies should use at least 2 links, only %d did: %+v", used, sess.Links)
-	}
-	if r := float64(sess.Engine.WireTxBytes) / float64(sess.Engine.UniqueTxBytes); r < 1.5 {
-		t.Errorf("expected ~2 copies per packet downstream, wire/unique = %.2f", r)
-	}
+	// How many copies go out depends on the links' pacing headroom (extra
+	// copies are only sent where they fit) and on automatic scaling, which
+	// drops to one copy once links prove reliable; on unlimited local links
+	// that varies run to run. Integrity is what this test checks.
+	t.Logf("downstream: %d links carried data, wire/unique = %.2f", used,
+		float64(sess.Engine.WireTxBytes)/float64(sess.Engine.UniqueTxBytes))
 	cs := r.cli.Snapshot(0)
 	var wins, dups uint64
 	for _, l := range cs.Links {
@@ -445,6 +509,7 @@ func TestBadTokenRejected(t *testing.T) {
 	ccfg.Server.Address = srv.Addr().String()
 	ccfg.Server.Token = "wrong"
 	ccfg.Interfaces.Exclude = ""
+	ccfg.SpeedTest.Enabled = false // fake interfaces: no real-network tests
 	c := client.New(config.NewMemory(ccfg), log)
 	c.NoTunnel = true
 	c.Discover = func() ([]platform.Iface, error) {
@@ -463,4 +528,134 @@ func TestBadTokenRejected(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("bad token not surfaced: %+v", c.Snapshot(0).Links)
+}
+
+// Starlink + metered phone: while Starlink works the phone carries only its
+// ~10% share of the download; when Starlink dies mid-transfer the phone
+// carries the rest and the download completes intact.
+func TestMeteredPhoneShareAndFailover(t *testing.T) {
+	r := newRig(t, []linkSpec{
+		{"eth0", "ethernet", 20 * time.Millisecond, 0},
+		{"eth3", "usb", 30 * time.Millisecond, 0},
+	}, func(c *config.Client) {
+		c.Links = map[string]config.Link{"eth3": {Metered: true, SharePct: 10}}
+	})
+	// Let the metered setting reach the server (policy resend).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ok := false
+		for _, l := range r.srv.Snapshot(0).Sessions[0].Links {
+			ok = ok || (l.Name == "eth3" && l.Metered)
+		}
+		if ok {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	phoneRx := func() uint64 {
+		for _, l := range r.cli.Snapshot(0).Links {
+			if l.Name == "eth3" {
+				return l.RxBytes
+			}
+		}
+		return 0
+	}
+	body := payload(8 << 20)
+	url := r.webServer(t, body)
+
+	before := phoneRx()
+	got, err := io.ReadAll(mustGet(t, r, url).Body)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("download with phone sharing: %v (%d bytes)", err, len(got))
+	}
+	share := float64(phoneRx()-before) / float64(len(body))
+	t.Logf("phone carried %.1f%% of the download while Starlink worked", share*100)
+	if share > 0.2 {
+		t.Fatalf("metered phone carried %.0f%%, want about 10%%", share*100)
+	}
+
+	resp := mustGet(t, r, url)
+	var buf bytes.Buffer
+	chunk := make([]byte, 32<<10)
+	killed := false
+	for {
+		n, err := resp.Body.Read(chunk)
+		buf.Write(chunk[:n])
+		if !killed && buf.Len() > len(body)/4 {
+			r.proxies["eth0"].dead.Store(true) // Starlink drops out
+			killed = true
+			if os.Getenv("E2E_PKT") != "" {
+				start := time.Now()
+				var n atomic.Int32
+				lf := func(s string) {
+					if el := time.Since(start); el > 1500*time.Millisecond && n.Add(1) < 60 {
+						t.Logf("PKT +%4dms %s", el.Milliseconds(), s)
+					}
+				}
+				r.os.pktLog.Store(&lf)
+			}
+			if os.Getenv("E2E_TRACE") != "" {
+				go func() {
+					for i := 0; i < 20; i++ {
+						time.Sleep(100 * time.Millisecond)
+						sv := r.srv.Snapshot(0).Sessions[0]
+						var sl string
+						for _, l := range sv.Links {
+							sl += fmt.Sprintf(" %s:%s/tx%d/q%d/rel%.2f", l.Name, l.State, l.TxBytes, l.Queue, l.Reliab)
+						}
+						cv := r.cli.Snapshot(0)
+						var cl string
+						for _, l := range cv.Links {
+							cl += fmt.Sprintf(" %s:%s/tx%d", l.Name, l.State, l.TxBytes)
+						}
+						t.Logf("t+%dms srv[%s] rtx=%d reinj=%d | cli[%s] skip=%d urx=%d", (i+1)*100, sl, sv.Engine.Retransmits, sv.Engine.Reinjected, cl, cv.Engine.ReorderSkip, cv.Engine.UniqueRxBytes)
+					}
+					for i := 2; i < 70; i++ {
+						time.Sleep(time.Second)
+						sv := r.srv.Snapshot(0).Sessions[0]
+						cv := r.cli.Snapshot(0)
+						var sl, cl string
+						for _, l := range sv.Links {
+							sl += fmt.Sprintf(" %s:%s/tx%d/q%d/pace%.0fk/shape%.0fk", l.Name, l.State, l.TxBytes, l.Queue, l.PaceBps/1e3, l.ShapeBps/1e3)
+						}
+						for _, l := range cv.Links {
+							cl += fmt.Sprintf(" %s:%s/tx%d", l.Name, l.State, l.TxBytes)
+						}
+						t.Logf("t+%ds TCP %v %v", i+1, r.srv.Gateway().TCPInfo(), r.srv.Gateway().TCPStats())
+						t.Logf("t+%ds SRVRX gaps=%d gaveup=%d skip=%d held=%d hold=%.0f urx=%d inord=%d waited=%d late=%d nackSent=%d | CLI rtx=%d prem=%d nackRecv=%d noLink=%d", i+1, sv.Engine.GapsDetected, sv.Engine.GapsGaveUp, sv.Engine.ReorderSkip, sv.Engine.ReorderHeld, sv.Engine.ReorderHoldMs, sv.Engine.UniqueRxBytes, sv.Engine.ReorderInOrd, sv.Engine.ReorderWaited, sv.Engine.ReorderLate, sv.Engine.NacksSent, cv.Engine.Retransmits, cv.Engine.RtxPremature, cv.Engine.NacksRecv, cv.Engine.NoLinkDrops)
+						t.Logf("t+%ds srv[%s] txBps=%.0f rtx=%d prem=%d nacks=%d | cli[%s] gaps=%d gaveup=%d skip=%d hold=%.0f urx=%d inord=%d waited=%d held=%d late=%d", i+1, sl, sv.Engine.TxBps, sv.Engine.Retransmits, sv.Engine.RtxPremature, sv.Engine.NacksRecv, cl, cv.Engine.GapsDetected, cv.Engine.GapsGaveUp, cv.Engine.ReorderSkip, cv.Engine.ReorderHoldMs, cv.Engine.UniqueRxBytes, cv.Engine.ReorderInOrd, cv.Engine.ReorderWaited, cv.Engine.ReorderHeld, cv.Engine.ReorderLate)
+					}
+				}()
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			sv := r.srv.Snapshot(0).Sessions[0]
+			for _, l := range sv.Links {
+				t.Logf("server link %s state=%s metered=%v share=%.2f tx=%d queue=%d pace=%.0f benched=%v", l.Name, l.State, l.Metered, l.Share, l.TxBytes, l.Queue, l.PaceBps, l.Benched)
+			}
+			t.Logf("server engine: %+v", sv.Engine)
+			cv := r.cli.Snapshot(0)
+			for _, l := range cv.Links {
+				t.Logf("client link %s state=%s rx=%d", l.Name, l.State, l.RxBytes)
+			}
+			t.Logf("client engine: %+v auto=%+v", cv.Engine, cv.Auto)
+			t.Fatalf("failover to metered phone failed: %v after %d bytes", err, buf.Len())
+		}
+	}
+	if !bytes.Equal(buf.Bytes(), body) {
+		t.Fatalf("payload corrupted after failover: %d bytes", buf.Len())
+	}
+}
+
+func mustGet(t *testing.T, r *rig, url string) *http.Response {
+	t.Helper()
+	resp, err := r.os.httpClient().Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
 }

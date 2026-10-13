@@ -55,6 +55,9 @@ func Load[T any](path string, def func() *T) (*Store[T], error) {
 // NewMemory creates a store without a backing file (tests, ephemeral runs).
 func NewMemory[T any](cfg *T) *Store[T] { return &Store[T]{cur: cfg} }
 
+// Path is the file backing the store ("" for memory stores).
+func (s *Store[T]) Path() string { return s.path }
+
 // Get returns the current config. Callers must treat it as read-only.
 func (s *Store[T]) Get() *T {
 	s.mu.RLock()

@@ -1,16 +1,16 @@
 # docker compose -f deploy/docker-compose.yml up -d
 services:
-  bond007:
-    image: bond007-server:latest
+  net-bond-007:
+    image: net-bond-007-server:latest
     build: ..
     restart: unless-stopped
     ports:
       - "7007:7007/udp"
       - "8080:8080/tcp"
     environment:
-      BOND007_TOKEN: ${BOND007_TOKEN:?set BOND007_TOKEN}
-      BOND007_UI_PASSWORD: ${BOND007_UI_PASSWORD:?set BOND007_UI_PASSWORD}
+      NET_BOND_007_TOKEN: ${NET_BOND_007_TOKEN:?set NET_BOND_007_TOKEN}
+      NET_BOND_007_UI_PASSWORD: ${NET_BOND_007_UI_PASSWORD:?set NET_BOND_007_UI_PASSWORD}
     volumes:
-      - bond007-data:/data
+      - net-bond-007-data:/data
 volumes:
-  bond007-data:
+  net-bond-007-data:

@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 
-	"github.com/rayzorben/bond007/internal/client"
-	"github.com/rayzorben/bond007/internal/config"
-	"github.com/rayzorben/bond007/internal/server"
-	"github.com/rayzorben/bond007/internal/webui"
+	"github.com/rayzorben/net-bond-007/internal/client"
+	"github.com/rayzorben/net-bond-007/internal/config"
+	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/server"
+	"github.com/rayzorben/net-bond-007/internal/webui"
 )
 
 // Logging builds a logger whose level follows the live config.
@@ -46,6 +48,13 @@ type ClientOverrides struct {
 // RunClient runs the client until ctx is cancelled.
 func RunClient(ctx context.Context, cfgPath string, ov ClientOverrides, logOut io.Writer) error {
 	log, lv, ring := Logging(logOut)
+	if cfgPath == platform.DefaultConfigPath("client") {
+		if moved, err := platform.MigrateLegacyConfig(cfgPath, "client"); moved {
+			log.Info("settings carried over from the pre-rename install", "from", platform.LegacyConfigPath("client"))
+		} else if err != nil {
+			log.Warn("could not carry over pre-rename settings", "err", err)
+		}
+	}
 	store, err := config.Load(cfgPath, config.DefaultClient)
 	if err != nil {
 		return fmt.Errorf("config %s: %w", cfgPath, err)
@@ -68,7 +77,7 @@ func RunClient(ctx context.Context, cfgPath string, ov ClientOverrides, logOut i
 		}
 	}
 	lv.Set(ParseLevel(store.Get().Log.Level))
-	log.Info("Bond007 client starting", "version", client.Version, "config", cfgPath)
+	log.Info("Net-Bond-007 client starting", "version", client.Version, "config", cfgPath)
 
 	c := client.New(store, log)
 	ui := webui.New(withLogs{client.Backend{C: c}, ring}, log)
@@ -92,8 +101,8 @@ func RunClient(ctx context.Context, cfgPath string, ov ClientOverrides, logOut i
 }
 
 // RunServer runs the server until ctx is cancelled. Environment variables
-// BOND007_TOKEN, BOND007_LISTEN, BOND007_UI_LISTEN, BOND007_UI_PASSWORD and
-// BOND007_NAME seed the config (handy for containers).
+// NET_BOND_007_TOKEN, NET_BOND_007_LISTEN, NET_BOND_007_UI_LISTEN, NET_BOND_007_UI_PASSWORD and
+// NET_BOND_007_NAME seed the config (handy for containers).
 func RunServer(ctx context.Context, cfgPath string, logOut io.Writer) error {
 	log, lv, ring := Logging(logOut)
 	store, err := config.Load(cfgPath, config.DefaultServer)
@@ -101,12 +110,12 @@ func RunServer(ctx context.Context, cfgPath string, logOut io.Writer) error {
 		return fmt.Errorf("config %s: %w", cfgPath, err)
 	}
 	env := map[string]func(c *config.Server, v string){
-		"BOND007_TOKEN":       func(c *config.Server, v string) { c.Token = v },
-		"BOND007_LISTEN":      func(c *config.Server, v string) { c.Listen = v },
-		"BOND007_UI_LISTEN":   func(c *config.Server, v string) { c.UI.Listen = v },
-		"BOND007_UI_PASSWORD": func(c *config.Server, v string) { c.UI.Password = v },
-		"BOND007_NAME":        func(c *config.Server, v string) { c.Name = v },
-		"BOND007_DNS":         func(c *config.Server, v string) { c.Egress.DNSUpstream = v },
+		"NET_BOND_007_TOKEN":       func(c *config.Server, v string) { c.Token = v },
+		"NET_BOND_007_LISTEN":      func(c *config.Server, v string) { c.Listen = v },
+		"NET_BOND_007_UI_LISTEN":   func(c *config.Server, v string) { c.UI.Listen = v },
+		"NET_BOND_007_UI_PASSWORD": func(c *config.Server, v string) { c.UI.Password = v },
+		"NET_BOND_007_NAME":        func(c *config.Server, v string) { c.Name = v },
+		"NET_BOND_007_DNS":         func(c *config.Server, v string) { c.Egress.DNSUpstream = v },
 	}
 	if err := store.Mutate(func(c *config.Server) {
 		for k, set := range env {
@@ -118,11 +127,15 @@ func RunServer(ctx context.Context, cfgPath string, logOut io.Writer) error {
 		return err
 	}
 	lv.Set(ParseLevel(store.Get().Log.Level))
-	log.Info("Bond007 server starting", "version", server.Version, "config", cfgPath)
+	log.Info("Net-Bond-007 server starting", "version", server.Version, "config", cfgPath)
 
 	s, err := server.New(store, log)
 	if err != nil {
 		return err
+	}
+	histDir := filepath.Join(filepath.Dir(cfgPath), "history")
+	if err := s.EnableHistory(histDir); err != nil {
+		log.Warn("history disabled", "dir", histDir, "err", err)
 	}
 	ui := webui.New(withLogs{server.Backend{S: s}, ring}, log)
 	if err := ui.Listen(store.Get().UI.Listen); err != nil {

@@ -1,6 +1,6 @@
 <script lang="ts" module>
   export interface Lane {
-    key: string; name: string; label?: string; kind: string; state: string; backup: boolean
+    key: string; name: string; label?: string; kind: string; state: string; backup: boolean; benched?: boolean
     rtt: number; loss: number
     up: number    // bits/s, left -> right
     down: number  // bits/s, right -> left
@@ -160,9 +160,10 @@
         ctx.lineWidth = 7 + traffic * 2.4
         ctx.strokeStyle = alpha(c, ln.backup ? 0.05 : 0.1)
         ctx.stroke()
+        const dim = ln.backup || ln.benched
         ctx.lineWidth = 2.2
-        ctx.strokeStyle = alpha(c, ln.backup ? 0.35 : ln.state === 'degraded' ? 0.55 : 0.85)
-        if (ln.backup) ctx.setLineDash([6, 6])
+        ctx.strokeStyle = alpha(c, dim ? 0.3 : ln.state === 'degraded' ? 0.55 : 0.85)
+        if (dim) ctx.setLineDash([6, 6])
         ctx.stroke()
       } else {
         ctx.setLineDash([4, 7])
@@ -279,6 +280,7 @@
         <span class="st">{ln.state}</span>
       {/if}
       {#if ln.backup}<span class="st">backup</span>{/if}
+      {#if ln.benched}<span class="st benched">benched</span>{/if}
     </button>
   {/each}
 
@@ -318,6 +320,7 @@
   .lane.degraded { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
   .lane.connecting .st { color: var(--info); }
   .lane.backup { opacity: 0.75; }
+  .lane .benched { color: var(--warn); }
   .crown { color: var(--gold); font-size: 12px; filter: drop-shadow(0 0 4px var(--gold)); }
   .empty { position: absolute; left: 50%; top: 22%; transform: translateX(-50%); color: var(--muted); font-size: 13px; }
   @media (max-width: 720px) {

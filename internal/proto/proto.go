@@ -1,4 +1,4 @@
-// Package proto defines the Bond007 wire format spoken between client and
+// Package proto defines the Net-Bond-007 wire format spoken between client and
 // server over UDP.
 //
 // Every datagram starts with an 8-byte common header:
@@ -50,6 +50,8 @@ const (
 	TypePolicy   Type = 6
 	TypeBye      Type = 7
 	TypeReject   Type = 8
+	// TypeNack asks the peer to retransmit missing DATA sequence numbers.
+	TypeNack Type = 9
 )
 
 func (t Type) String() string {
@@ -70,6 +72,8 @@ func (t Type) String() string {
 		return "BYE"
 	case TypeReject:
 		return "REJECT"
+	case TypeNack:
+		return "NACK"
 	}
 	return "UNKNOWN"
 }
@@ -258,21 +262,33 @@ type HelloAck struct {
 
 // Policy tells the server how to schedule downstream traffic for a session.
 type Policy struct {
-	Mode                   string            `json:"mode"`
-	Strategy               string            `json:"strategy"`
-	Redundancy             int               `json:"redundancy"`
-	SmallPacketMirrorBytes int               `json:"smallMirror"`
-	RealtimeMirror         bool              `json:"realtimeMirror"`
-	RealtimePorts          string            `json:"realtimePorts"`
-	ReorderMode            string            `json:"reorderMode"`
-	ReorderMs              int               `json:"reorderMs"`
-	QueueDepth             int               `json:"queueDepth"`
-	Pacing                 bool              `json:"pacing"`
-	PacingStartMbps        int               `json:"pacingStartMbps"`
-	PacingDelayMs          int               `json:"pacingDelayMs"`
-	PacingLossPct          int               `json:"pacingLossPct"`
-	LatencyWeighting       bool              `json:"latencyWeighting"`
-	LinkMaxMbps            map[uint8]float64 `json:"linkMaxMbps,omitempty"`
+	Mode                   string `json:"mode"`
+	Strategy               string `json:"strategy"`
+	Redundancy             int    `json:"redundancy"`
+	SmallPacketMirrorBytes int    `json:"smallMirror"`
+	RealtimeMirror         bool   `json:"realtimeMirror"`
+	RealtimePorts          string `json:"realtimePorts"`
+	ReorderMode            string `json:"reorderMode"`
+	ReorderMs              int    `json:"reorderMs"`
+	QueueDepth             int    `json:"queueDepth"`
+	Pacing                 bool   `json:"pacing"`
+	PacingStartMbps        int    `json:"pacingStartMbps"`
+	PacingDelayMs          int    `json:"pacingDelayMs"`
+	PacingLossPct          int    `json:"pacingLossPct"`
+	Retransmit             bool   `json:"retransmit"`
+	Shaping                bool   `json:"shaping"`
+	// Automatic scaling decided by the client: copies per packet and which
+	// links to stop using. Zero/empty = not active.
+	AutoCopies int     `json:"autoCopies,omitempty"`
+	Benched    []uint8 `json:"benched,omitempty"`
+	// What automatic scaling is doing, for the server's history log.
+	AutoMode         string            `json:"autoMode,omitempty"`
+	AutoDirectVia    string            `json:"autoDirectVia,omitempty"`
+	LatencyWeighting bool              `json:"latencyWeighting"`
+	LinkMaxMbps      map[uint8]float64 `json:"linkMaxMbps,omitempty"`
+	// Metered links (phone hotspots): the share of traffic each may carry
+	// while other links work (0 = failover only). Absent = not metered.
+	MeteredShare map[uint8]float64 `json:"meteredShare,omitempty"`
 }
 
 type Reject struct {
@@ -296,4 +312,48 @@ func ParseJSON(b []byte, v any) error {
 		return ErrShort
 	}
 	return json.Unmarshal(b[HeaderLen:], v)
+}
+
+// SeqRange is a run of missing sequence numbers [Start, Start+Count).
+type SeqRange struct {
+	Start uint64
+	Count uint16
+}
+
+// MaxNackRanges bounds one NACK frame (10 bytes per range).
+const MaxNackRanges = 100
+
+// AppendNack builds a NACK frame listing missing sequence ranges.
+func AppendNack(dst []byte, session uint32, link uint8, ranges []SeqRange) []byte {
+	if len(ranges) > MaxNackRanges {
+		ranges = ranges[:MaxNackRanges]
+	}
+	dst = append(dst[:0], make([]byte, HeaderLen+2+10*len(ranges))...)
+	PutHeader(dst, Header{Type: TypeNack, Session: session, Link: link})
+	b := dst[HeaderLen:]
+	binary.BigEndian.PutUint16(b, uint16(len(ranges)))
+	for i, r := range ranges {
+		o := 2 + 10*i
+		binary.BigEndian.PutUint64(b[o:], r.Start)
+		binary.BigEndian.PutUint16(b[o+8:], r.Count)
+	}
+	return dst
+}
+
+// ParseNack decodes the ranges of a NACK frame.
+func ParseNack(f []byte) ([]SeqRange, error) {
+	if len(f) < HeaderLen+2 {
+		return nil, ErrShort
+	}
+	b := f[HeaderLen:]
+	n := int(binary.BigEndian.Uint16(b))
+	if n > MaxNackRanges || len(b) < 2+10*n {
+		return nil, ErrShort
+	}
+	out := make([]SeqRange, n)
+	for i := range out {
+		o := 2 + 10*i
+		out[i] = SeqRange{Start: binary.BigEndian.Uint64(b[o:]), Count: binary.BigEndian.Uint16(b[o+8:])}
+	}
+	return out, nil
 }

@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rayzorben/bond007/internal/bond"
-	"github.com/rayzorben/bond007/internal/metrics"
-	"github.com/rayzorben/bond007/internal/platform"
-	"github.com/rayzorben/bond007/internal/proto"
+	"github.com/rayzorben/net-bond-007/internal/bond"
+	"github.com/rayzorben/net-bond-007/internal/metrics"
+	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/proto"
 )
 
 // clink is one interface's path to the server.
@@ -37,6 +37,11 @@ type clink struct {
 	downCap    atomic.Uint32
 	lastRxB    uint64
 	lastRxAt   time.Time
+
+	testing     atomic.Bool      // a speed test is loading this link on purpose
+	meterSeen   uint64           // wire bytes already counted towards usage
+	rel         bond.Reliability // long-run delivery score (automatic scaling)
+	lastAckSeen time.Time
 }
 
 func (c *Client) openLink(e *bond.Engine, it platform.Iface, id uint8) (*clink, error) {
@@ -107,6 +112,9 @@ func (l *clink) reader() {
 		switch h.Type {
 		case proto.TypeData:
 			l.e.Receive(l.link, f)
+		case proto.TypeNack:
+			l.link.Rx.Add(n)
+			l.e.HandleNack(f)
 		case proto.TypeProbeAck:
 			a, err := proto.ParseProbeAck(f)
 			if err != nil {
@@ -231,6 +239,10 @@ func (l *clink) evaluate(now time.Time) {
 	}
 	l.upRate.Sample(l.upBytes, now)
 	delivered := l.upRate.BPS
+	// Reliability sample: did this link deliver anything (a probe reply)
+	// during the last interval?
+	gotAck := l.probes.LastAck.After(l.lastAckSeen)
+	l.lastAckSeen = l.probes.LastAck
 	l.mu.Unlock()
 
 	var srtt, recent, minRTT time.Duration
@@ -239,15 +251,32 @@ func (l *clink) evaluate(now time.Time) {
 		srtt, minRTT = h.RTT.SRTT, h.RTT.Min
 		recent = (h.RTT.SRTT + h.RTT.Last) / 2 // react faster than SRTT alone
 	})
-	l.link.Pacer.Govern(now, recent, minRTT, loss, delivered)
+	testing := l.testing.Load()
+	if !testing { // our own speed test fills the queue: not a signal
+		l.link.Pacer.Govern(now, recent, minRTT, loss, delivered)
+		l.link.Shaper.Observe(now, delivered)
+	}
 	st := bond.Classify(bond.HealthParams{
 		DegradedRTT:  time.Duration(cfg.DegradedRTTMs) * time.Millisecond,
 		DegradedLoss: cfg.DegradedLossPct / 100,
 		DownLoss:     cfg.DownLossPct / 100,
 		DownAfter:    time.Duration(cfg.DownAfterMs) * time.Millisecond,
 	}, everAcked && l.helloAcked.Load(), now.Sub(last), srtt, loss)
+	if prev := l.link.State(); testing && st == bond.StateDegraded && prev == bond.StateUp {
+		st = prev // a saturated link during a speed test isn't degraded
+	}
 	if prev := l.link.State(); prev != st {
 		l.c.log.Info("link state", "link", l.iface.Name, "from", prev, "to", st)
 	}
 	l.link.SetState(st)
+
+	bcfg := l.c.cfg.Get().Bonding
+	l.mu.Lock()
+	if !testing {
+		l.rel.Observe(gotAck && st != bond.StateDown, now,
+			time.Duration(bcfg.ReliabilityFallSec)*time.Second, time.Duration(bcfg.ReliabilityRiseSec)*time.Second)
+	}
+	r := l.rel.Value()
+	l.mu.Unlock()
+	l.link.Health(func(h *bond.Health) { h.Reliability = r })
 }

@@ -12,6 +12,15 @@ type TunnelSpec struct {
 	Routes     []netip.Prefix
 	DNS        netip.Addr // invalid = leave DNS alone
 	RouterMode bool
+	// Direct: route the same prefixes straight out of one physical link
+	// instead of through the tunnel (automatic scaling, single-link bypass).
+	Direct    bool
+	DirectDev string
+	DirectGW  netip.Addr
+	// ViaTunnel: addresses whose router-originated traffic must use the
+	// tunnel even where the firmware routes the router's own traffic
+	// elsewhere (the router's DNS upstreams). Linux router mode only.
+	ViaTunnel []netip.Addr
 }
 
 // FullTunnelRoutes cover all of IPv4 with two /1s, which win over the default

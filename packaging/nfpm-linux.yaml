@@ -1,4 +1,4 @@
-name: bond007
+name: net-bond-007
 arch: ${NFPM_ARCH}
 platform: linux
 version: ${VERSION}
@@ -6,17 +6,17 @@ section: net
 priority: optional
 maintainer: Raymond Bennett <raymond.bennett@gmail.com>
 description: |
-  Bond007 multipath bonding client. Bonds Ethernet, Wi-Fi, USB tethering,
+  Net-Bond-007 multipath bonding client. Bonds Ethernet, Wi-Fi, USB tethering,
   cellular and Bluetooth into one faster, more reliable connection.
-homepage: https://github.com/rayzorben/bond007
+homepage: https://github.com/rayzorben/net-bond-007
 license: MIT
 contents:
   - src: ${BIN}
-    dst: /usr/bin/bond007
+    dst: /usr/bin/net-bond-007
     file_info: { mode: 0755 }
-  - src: packaging/linux/bond007.service
-    dst: /usr/lib/systemd/system/bond007.service
-  - dst: /etc/bond007
+  - src: packaging/linux/net-bond-007.service
+    dst: /usr/lib/systemd/system/net-bond-007.service
+  - dst: /etc/net-bond-007
     type: dir
     file_info: { mode: 0755 }
 scripts:

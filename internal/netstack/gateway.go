@@ -16,6 +16,7 @@ package netstack
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -72,6 +73,7 @@ type Gateway struct {
 	limitMu sync.Mutex
 	perIP   map[netip.Addr]int
 	MaxPer  atomic.Int64
+	eps     sync.Map // tcpip.Endpoint -> struct{}: live inner TCP connections
 }
 
 // New creates a gateway. gateway is the tunnel-side address of the server
@@ -245,6 +247,8 @@ func (g *Gateway) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	r.Complete(false)
+	g.eps.Store(ep, struct{}{})
+	defer g.eps.Delete(ep)
 	ep.SocketOptions().SetKeepAlive(true)
 	local := gonet.NewTCPConn(&wq, ep)
 
@@ -360,3 +364,38 @@ func (g *Gateway) handleUDP(r *udp.ForwarderRequest) bool {
 }
 
 var _ io.Closer = (*gonet.TCPConn)(nil)
+
+// TCPInfo describes each live inner TCP connection's sender state
+// (diagnostics).
+func (g *Gateway) TCPInfo() []string {
+	var out []string
+	g.eps.Range(func(k, _ any) bool {
+		var ti tcpip.TCPInfoOption
+		if err := k.(tcpip.Endpoint).GetSockOpt(&ti); err == nil {
+			out = append(out, fmt.Sprintf("state=%v cc=%v cwnd=%d ssthresh=%d rtt=%v rttvar=%v rto=%v reorder=%v",
+				ti.State, ti.CcState, ti.SndCwnd, ti.SndSsthresh, ti.RTT, ti.RTTVar, ti.RTO, ti.ReorderSeen))
+		}
+		return true
+	})
+	return out
+}
+
+// TCPStats exposes the userspace TCP stack's loss-recovery counters for the
+// dashboard: they show whether inner connections are hitting timeouts or
+// recovering cleanly.
+func (g *Gateway) TCPStats() map[string]uint64 {
+	st := g.stack.Stats().TCP
+	return map[string]uint64{
+		"segmentsSent":     st.SegmentsSent.Value(),
+		"retransmits":      st.Retransmits.Value(),
+		"fastRetransmit":   st.FastRetransmit.Value(),
+		"fastRecovery":     st.FastRecovery.Value(),
+		"sackRecovery":     st.SACKRecovery.Value(),
+		"tlpRecovery":      st.TLPRecovery.Value(),
+		"timeouts":         st.Timeouts.Value(),
+		"slowStartRetrans": st.SlowStartRetransmits.Value(),
+		"spuriousRecovery": st.SpuriousRecovery.Value(),
+		"spuriousRTO":      st.SpuriousRTORecovery.Value(),
+		"dsackAcked":       st.SegmentsAckedWithDSACK.Value(),
+	}
+}

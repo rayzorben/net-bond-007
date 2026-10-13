@@ -14,7 +14,7 @@ class Store {
   totals = $state<Point[]>([])
   config = $state<any>(null)
   schema = $state<Section[]>([])
-  page = $state<'overview' | 'settings' | 'logs'>('overview')
+  page = $state<'overview' | 'connections' | 'history' | 'settings' | 'logs'>('overview')
   selected = $state<string | null>(null) // link key for the drill-down drawer
   toasts = $state<{ id: number; kind: 'ok' | 'err' | 'info'; text: string }[]>([])
 
@@ -26,7 +26,7 @@ class Store {
     this.info = r.info
     this.authRequired = r.authRequired
     this.authed = r.authenticated
-    document.title = r.info.role === 'server' ? 'Bond007 · Server' : `Bond007 · ${r.info.name}`
+    document.title = r.info.role === 'server' ? 'Net-Bond-007 · Server' : `Net-Bond-007 · ${r.info.name}`
     if (this.authed) await this.connect()
   }
 
@@ -102,10 +102,16 @@ class Store {
     this.schema = await api('GET', '/api/schema')
   }
 
-  /** Save the whole config. Returns an error string or null. */
-  async saveConfig(cfg: any): Promise<string | null> {
+  /**
+   * Save settings. Only the fields that differ from `base` (what the caller
+   * started from) are sent, so a stale tab or an old copy can never silently
+   * revert settings it didn't touch. Returns an error string or null.
+   */
+  async saveConfig(cfg: any, base: any = $state.snapshot(this.config)): Promise<string | null> {
+    const patch = diff(base, cfg)
+    if (patch === undefined) return null
     try {
-      this.config = await api('PUT', '/api/config', cfg)
+      this.config = await api('PUT', '/api/config', patch)
       return null
     } catch (e: any) {
       return e.message
@@ -150,6 +156,20 @@ function mergeLinks(prev: LinkView[] | undefined, next: LinkView[]): LinkView[] 
 }
 
 export const key = (l: { id: number; name: string }) => `${l.id}:${l.name}`
+
+/** Deep difference: the parts of `next` that differ from `prev` (undefined if none). */
+export function diff(prev: any, next: any): any {
+  if (typeof next !== 'object' || next === null || Array.isArray(next) || typeof prev !== 'object' || prev === null || Array.isArray(prev)) {
+    return JSON.stringify(prev) === JSON.stringify(next) ? undefined : next
+  }
+  const out: any = {}
+  let any = false
+  for (const k of Object.keys(next)) {
+    const d = diff(prev[k], next[k])
+    if (d !== undefined) { out[k] = d; any = true }
+  }
+  return any ? out : undefined
+}
 
 export async function api(method: string, url: string, body?: unknown) {
   const r = await fetch(url, {

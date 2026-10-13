@@ -32,6 +32,8 @@ type Candidate struct {
 	Weight  float64 // relative share; <=0 is treated as 1
 	Usable  bool    // link is up and its queue has room
 	Backup  bool    // only used when no primary link is usable
+	Benched bool    // automatic scaling stopped using it (still monitored)
+	Metered bool    // over its metered budget: failover only
 	Degrade bool    // healthy enough to use, but weight is reduced
 	// Delay is the estimated time for a packet sent now to arrive: one-way
 	// latency plus the time to drain what is already queued on the link.
@@ -124,13 +126,29 @@ func New() *Scheduler { return &Scheduler{credit: make(map[uint8]float64)} }
 func Eligible(cands []Candidate, dst []Candidate) []Candidate {
 	dst = dst[:0]
 	for _, c := range cands {
-		if c.Usable && !c.Backup {
+		if c.Usable && !c.Backup && !c.Benched && !c.Metered {
 			dst = append(dst, c)
 		}
 	}
 	if len(dst) == 0 {
 		for _, c := range cands {
-			if c.Usable && c.Backup {
+			if c.Usable && c.Backup && !c.Benched && !c.Metered {
+				dst = append(dst, c)
+			}
+		}
+	}
+	// Metered links over budget: failover when nothing else is usable.
+	if len(dst) == 0 {
+		for _, c := range cands {
+			if c.Usable && c.Metered && !c.Benched {
+				dst = append(dst, c)
+			}
+		}
+	}
+	// Benched links are the last resort: better than dropping the packet.
+	if len(dst) == 0 {
+		for _, c := range cands {
+			if c.Usable {
 				dst = append(dst, c)
 			}
 		}

@@ -11,8 +11,8 @@ import (
 )
 
 const systemdUnit = `[Unit]
-Description=Bond007 multipath bonding client
-Documentation=https://github.com/rayzorben/bond007
+Description=Net-Bond-007 multipath bonding client
+Documentation=https://github.com/rayzorben/net-bond-007
 After=network-online.target
 Wants=network-online.target
 
@@ -27,7 +27,7 @@ WantedBy=multi-user.target
 `
 
 const procdInit = `#!/bin/sh /etc/rc.common
-# Bond007 multipath bonding client
+# Net-Bond-007 multipath bonding client
 START=95
 STOP=10
 USE_PROCD=1
@@ -50,42 +50,42 @@ func InstallService(cfgPath string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("install needs root: run with sudo")
 	}
-	dst := "/usr/local/bin/bond007"
+	dst := "/usr/local/bin/net-bond-007"
 	if IsOpenWrt() {
-		dst = "/usr/bin/bond007"
+		dst = "/usr/bin/net-bond-007"
 	}
 	if err := copySelf(dst); err != nil {
 		return err
 	}
 	if IsOpenWrt() {
-		if err := os.WriteFile("/etc/init.d/bond007", []byte(fmt.Sprintf(procdInit, dst, cfgPath)), 0o755); err != nil {
+		if err := os.WriteFile("/etc/init.d/net-bond-007", []byte(fmt.Sprintf(procdInit, dst, cfgPath)), 0o755); err != nil {
 			return err
 		}
-		run("/etc/init.d/bond007", "enable")
-		return run("/etc/init.d/bond007", "restart")
+		run("/etc/init.d/net-bond-007", "enable")
+		return run("/etc/init.d/net-bond-007", "restart")
 	}
 	if !have("systemctl") {
 		return fmt.Errorf("no systemd found; run '%s run' from your init system", dst)
 	}
 	unit := fmt.Sprintf(systemdUnit, dst, cfgPath)
-	if err := os.WriteFile("/etc/systemd/system/bond007.service", []byte(unit), 0o644); err != nil {
+	if err := os.WriteFile("/etc/systemd/system/net-bond-007.service", []byte(unit), 0o644); err != nil {
 		return err
 	}
 	run("systemctl", "daemon-reload")
-	return run("systemctl", "enable", "--now", "bond007.service")
+	return run("systemctl", "enable", "--now", "net-bond-007.service")
 }
 
 func UninstallService() error {
 	if IsOpenWrt() {
-		run("/etc/init.d/bond007", "stop")
-		run("/etc/init.d/bond007", "disable")
-		os.Remove("/etc/init.d/bond007")
+		run("/etc/init.d/net-bond-007", "stop")
+		run("/etc/init.d/net-bond-007", "disable")
+		os.Remove("/etc/init.d/net-bond-007")
 		return nil
 	}
-	run("systemctl", "disable", "--now", "bond007.service")
-	os.Remove("/etc/systemd/system/bond007.service")
+	run("systemctl", "disable", "--now", "net-bond-007.service")
+	os.Remove("/etc/systemd/system/net-bond-007.service")
 	run("systemctl", "daemon-reload")
-	os.Remove("/usr/local/bin/bond007")
+	os.Remove("/usr/local/bin/net-bond-007")
 	return nil
 }
 

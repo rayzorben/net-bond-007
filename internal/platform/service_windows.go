@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const ServiceName = "Bond007"
+const ServiceName = "Net-Bond-007"
 
 func IsOpenWrt() bool { return false }
 
@@ -26,7 +26,7 @@ func installDir() string {
 	if pf == "" {
 		pf = `C:\Program Files`
 	}
-	return filepath.Join(pf, "Bond007")
+	return filepath.Join(pf, "Net-Bond-007")
 }
 
 // IsElevated reports whether we run with administrator rights.
@@ -61,7 +61,7 @@ func InstallService(cfgPath string) error {
 	if !IsElevated() {
 		return fmt.Errorf("install needs administrator rights")
 	}
-	dst := filepath.Join(installDir(), "bond007.exe")
+	dst := filepath.Join(installDir(), "net-bond-007.exe")
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
@@ -81,7 +81,7 @@ func InstallService(cfgPath string) error {
 		return err
 	}
 	s, err := m.CreateService(ServiceName, dst, mgr.Config{
-		DisplayName:      "Bond007 Multipath Bonding",
+		DisplayName:      "Net-Bond-007 Multipath Bonding",
 		Description:      "Bonds all of your network connections into one fast, reliable link.",
 		StartType:        mgr.StartAutomatic,
 		DelayedAutoStart: false,

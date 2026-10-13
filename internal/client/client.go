@@ -1,4 +1,4 @@
-// Package client is the Bond007 endpoint that runs on laptops, desktops and
+// Package client is the Net-Bond-007 endpoint that runs on laptops, desktops and
 // routers. It discovers network interfaces, opens one UDP path per interface
 // to the server (each socket pinned to its interface), keeps every path under
 // constant health monitoring, and moves the OS's traffic between a virtual
@@ -16,18 +16,21 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/rayzorben/bond007/internal/bond"
-	"github.com/rayzorben/bond007/internal/config"
-	"github.com/rayzorben/bond007/internal/platform"
-	"github.com/rayzorben/bond007/internal/proto"
-	"github.com/rayzorben/bond007/internal/sched"
-	"github.com/rayzorben/bond007/internal/webui"
+	"github.com/rayzorben/net-bond-007/internal/bond"
+	"github.com/rayzorben/net-bond-007/internal/config"
+	"github.com/rayzorben/net-bond-007/internal/names"
+	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/proto"
+	"github.com/rayzorben/net-bond-007/internal/sched"
+	"github.com/rayzorben/net-bond-007/internal/webui"
 )
 
 var Version = "dev"
@@ -69,6 +72,12 @@ type Client struct {
 	tunUndo func()
 	tunErr  string
 
+	names      names.Cache
+	usage      *Usage
+	speed      *speedTester
+	auto       bond.AutoScaler
+	ab         abState
+	plan       atomic.Pointer[bond.Plan] // automatic scaling decision (nil = off)
 	policySent atomic.Int64
 	started    time.Time
 	closed     chan struct{}
@@ -87,6 +96,13 @@ func New(cfg *config.Store[config.Client], log *slog.Logger) *Client {
 		kick:     make(chan struct{}, 1),
 	}
 	c.Dial = c.dialBound
+	if p := cfg.Path(); p != "" {
+		c.usage = LoadUsage(filepath.Join(filepath.Dir(p), "usage.json"))
+		c.speed = newSpeedTester(filepath.Join(filepath.Dir(p), "speedtests.json"))
+	} else {
+		c.usage = LoadUsage("")
+		c.speed = newSpeedTester("")
+	}
 	return c
 }
 
@@ -101,6 +117,7 @@ func (c *Client) Start() {
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		c.usage.Save(true)
 		c.mu.Lock()
 		for name, l := range c.links {
 			l.close(true)
@@ -135,6 +152,7 @@ func randomSession() uint32 {
 func (c *Client) newSession() {
 	cfg := c.cfg.Get()
 	e := bond.New(randomSession(), c.deliver)
+	e.SetUpstream(true)
 	e.SetHistory(cfg.Health.HistorySeconds)
 	e.SetQueueDepth(cfg.Bonding.QueueDepth)
 	c.applyPolicy(e, cfg)
@@ -171,11 +189,17 @@ func (c *Client) SendPacket(pkt []byte) {
 }
 
 func (c *Client) applyPolicy(e *bond.Engine, cfg *config.Client) {
+	e.SetARQ(cfg.Bonding.Retransmit)
 	ports, _ := sched.ParsePorts(cfg.Bonding.RealtimePorts)
+	mode, red := sched.Mode(cfg.Bonding.Mode), cfg.Bonding.Redundancy
+	if p := c.plan.Load(); p != nil && p.Copies > 0 {
+		// Automatic scaling picked the number of copies.
+		mode, red = sched.ModeCustom, p.Copies
+	}
 	e.SetPolicy(sched.Policy{
-		Mode:                   sched.Mode(cfg.Bonding.Mode),
+		Mode:                   mode,
 		Strategy:               sched.Strategy(cfg.Bonding.Strategy),
-		Redundancy:             cfg.Bonding.Redundancy,
+		Redundancy:             red,
 		SmallPacketMirrorBytes: cfg.Bonding.SmallPacketMirrorBytes,
 		RealtimeMirror:         cfg.Bonding.RealtimeMirror,
 		RealtimePorts:          ports,
@@ -195,14 +219,23 @@ func (c *Client) wirePolicy() proto.Policy {
 	return proto.Policy{
 		Pacing:                 cfg.Bonding.Pacing,
 		PacingStartMbps:        cfg.Bonding.PacingStartMbps,
+		PacingDelayMs:          cfg.Bonding.PacingDelayMs,
+		PacingLossPct:          cfg.Bonding.PacingLossPct,
+		Retransmit:             cfg.Bonding.Retransmit,
+		Shaping:                cfg.Bonding.Shaping,
 		LatencyWeighting:       cfg.Bonding.LatencyWeighting,
 		LinkMaxMbps:            caps,
+		MeteredShare:           c.meteredShares(),
 		Mode:                   cfg.Bonding.Mode,
 		Strategy:               cfg.Bonding.Strategy,
 		Redundancy:             cfg.Bonding.Redundancy,
 		SmallPacketMirrorBytes: cfg.Bonding.SmallPacketMirrorBytes,
 		RealtimeMirror:         cfg.Bonding.RealtimeMirror,
 		RealtimePorts:          cfg.Bonding.RealtimePorts,
+		AutoCopies:             autoCopies(c.plan.Load()),
+		AutoMode:               autoMode(c.plan.Load()),
+		AutoDirectVia:          c.directViaName(),
+		Benched:                autoBenched(c.plan.Load()),
 		ReorderMode:            cfg.Bonding.ReorderMode,
 		ReorderMs:              cfg.Bonding.ReorderMs,
 		QueueDepth:             cfg.Bonding.QueueDepth,
@@ -233,6 +266,7 @@ func (c *Client) onConfig(old, cfg *config.Client) {
 	for name, l := range c.links {
 		l.link.Pacer.Configure(cfg.Bonding.Pacing, float64(cfg.Bonding.PacingStartMbps)*1e6, cfg.Links[name].MaxMbps*1e6)
 		l.link.Pacer.Tuning(time.Duration(cfg.Bonding.PacingDelayMs)*time.Millisecond, float64(cfg.Bonding.PacingLossPct)/100)
+		l.link.Shaper.Configure(cfg.Bonding.Shaping)
 	}
 	c.mu.Unlock()
 	if old.Tunnel != cfg.Tunnel {
@@ -259,6 +293,7 @@ func (c *Client) loop() {
 				lastScan = now
 			}
 			c.tick(now)
+			c.speedTick(now, c.cfg.Get())
 		}
 	}
 }
@@ -393,6 +428,7 @@ func (c *Client) reconcile() {
 		l.link.SetBackup(lc.Backup)
 		l.link.Pacer.Configure(cfg.Bonding.Pacing, float64(cfg.Bonding.PacingStartMbps)*1e6, lc.MaxMbps*1e6)
 		l.link.Pacer.Tuning(time.Duration(cfg.Bonding.PacingDelayMs)*time.Millisecond, float64(cfg.Bonding.PacingLossPct)/100)
+		l.link.Shaper.Configure(cfg.Bonding.Shaping)
 		l.link.Health(func(h *bond.Health) {
 			h.Label = lc.Label
 			h.ManualCap = lc.MaxMbps * 1e6
@@ -511,8 +547,16 @@ func (c *Client) tick(now time.Time) {
 	case "fixed":
 		e.SetReorderHold(time.Duration(cfg.Bonding.ReorderMs) * time.Millisecond)
 	default:
-		e.SetReorderHold(e.AutoReorderHold(time.Duration(cfg.Bonding.ReorderMs) * time.Millisecond))
+		maxHold := time.Duration(cfg.Bonding.ReorderMs) * time.Millisecond
+		hold := e.AutoReorderHold(maxHold)
+		if e.ARQ() {
+			// Repairs, not slow links, are what a gap waits for.
+			hold = e.ARQHold(maxHold)
+		}
+		e.SetReorderHold(hold)
 	}
+	c.meter(now, cfg, links)
+	c.autoScale(now, cfg, e, links)
 	e.Tick(now)
 	if now.UnixNano()-c.policySent.Load() > int64(5*time.Second) && c.ack.Load() != nil {
 		pol := c.wirePolicy()
@@ -581,6 +625,25 @@ func (c *Client) applyTunnel() {
 	if cfg.Tunnel.DNSOverride {
 		spec.DNS, _ = netip.ParseAddr(a.DNS)
 	}
+	if cfg.Tunnel.RouterMode && cfg.Tunnel.FullTunnel {
+		// The router's own DNS lookups (AdGuard Home's upstreams) fail over
+		// with the bond instead of riding a dead WAN.
+		spec.ViaTunnel = platform.RouterDNSUpstreams()
+	}
+	if p := c.plan.Load(); p != nil && p.Direct {
+		// Single reliable link: send traffic straight out of it.
+		c.mu.Lock()
+		for _, l := range c.links {
+			if l.id == p.DirectVia {
+				spec.Direct, spec.DirectDev = true, l.iface.Name
+			}
+		}
+		c.mu.Unlock()
+		if spec.Direct {
+			spec.DirectGW = platform.DefaultGateway(spec.DirectDev)
+			spec.DNS = netip.Addr{}
+		}
+	}
 
 	c.tunMu.Lock()
 	defer c.tunMu.Unlock()
@@ -611,6 +674,10 @@ func (c *Client) applyTunnel() {
 		return
 	}
 	c.tunErr = ""
+	if spec.Direct {
+		c.log.Info("going direct: only one reliable link", "via", spec.DirectDev, "gateway", spec.DirectGW)
+		return
+	}
 	c.log.Info("virtual adapter up", "name", spec.Name, "ip", spec.Addr, "routes", len(spec.Routes), "dns", spec.DNS)
 }
 
@@ -685,6 +752,7 @@ type StateView struct {
 	Links      []bond.LinkView `json:"links"`
 	Interfaces []IfaceView     `json:"interfaces"`
 	Warnings   []string        `json:"warnings"`
+	Auto       *AutoView       `json:"auto,omitempty"`
 }
 
 func (c *Client) Snapshot(history int) StateView {
@@ -718,6 +786,14 @@ func (c *Client) Snapshot(history int) StateView {
 		lv := l.View(history)
 		if cl, ok := linksByName[l.Name]; ok {
 			lv.Local = cl.iface.PrimaryIPv4().String()
+			if r := c.speed.lastResult(l.Name); r != nil {
+				lv.Tested = &bond.TestedSpeed{DownBps: r.DownMbps * 1e6, UpBps: r.UpMbps * 1e6, PingMs: r.PingMs, At: r.At}
+			}
+			if lc := cfg.Links[l.Name]; lc.Metered {
+				u := c.usage.Get(l.Name)
+				lv.Usage = &bond.MeterUsage{UsedBytes: u.Bytes, CapBytes: uint64(lc.MonthlyCapGB * 1e9), CycleStart: u.CycleStart}
+				lv.Usage.OverCap = lv.Usage.CapBytes > 0 && u.Bytes >= lv.Usage.CapBytes
+			}
 			if !cl.helloAcked.Load() && lv.LastError == "" {
 				lv.LastError = cl.status()
 			}
@@ -769,6 +845,18 @@ func (c *Client) Snapshot(history int) StateView {
 	}
 
 	v.Warnings = []string{}
+	if p := c.plan.Load(); p != nil {
+		av := &AutoView{Mode: p.Mode, Copies: p.Copies, Direct: p.Direct}
+		for _, l := range e.Links() {
+			if l.ID == p.DirectVia && p.Direct {
+				av.DirectVia = l.Name
+			}
+			if p.Benched[l.ID] {
+				av.Benched = append(av.Benched, l.Name)
+			}
+		}
+		v.Auto = av
+	}
 	if cfg.Server.Token == "" && cfg.Server.Address != "" {
 		v.Warnings = append(v.Warnings, "No access token set.")
 	}
@@ -871,6 +959,41 @@ func (b Backend) Routes(mux *http.ServeMux) {
 		}
 		webui.WriteJSON(w, http.StatusOK, lc)
 	})
+	mux.HandleFunc("POST /api/x/abtest", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			URL    string `json:"url"`
+			Rounds int    `json:"rounds"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if err := b.C.StartAB(req.URL, req.Rounds); err != nil {
+			webui.WriteJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		webui.WriteJSON(w, http.StatusOK, b.C.ABResult())
+	})
+	mux.HandleFunc("GET /api/x/abtest", func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteJSON(w, http.StatusOK, b.C.ABResult())
+	})
+	mux.HandleFunc("GET /api/x/speedtest", func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteJSON(w, http.StatusOK, b.C.SpeedReport())
+	})
+	mux.HandleFunc("POST /api/x/speedtest/{name}", func(w http.ResponseWriter, r *http.Request) {
+		if err := b.C.RunSpeedTest(r.PathValue("name")); err != nil {
+			webui.WriteJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		webui.WriteJSON(w, http.StatusOK, b.C.SpeedReport())
+	})
+	mux.HandleFunc("POST /api/x/pathcheck", func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteJSON(w, http.StatusOK, b.C.PathCheck())
+	})
+	mux.HandleFunc("POST /api/x/usage/{name}/reset", func(w http.ResponseWriter, r *http.Request) {
+		b.C.usage.Reset(r.PathValue("name"))
+		webui.WriteJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+	})
+	mux.HandleFunc("GET /api/x/connections", func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteJSON(w, http.StatusOK, map[string]any{"devices": b.C.Connections()})
+	})
 	mux.HandleFunc("POST /api/x/reconnect", func(w http.ResponseWriter, r *http.Request) {
 		b.C.mu.Lock()
 		for name, l := range b.C.links {
@@ -885,4 +1008,106 @@ func (b Backend) Routes(mux *http.ServeMux) {
 	})
 }
 
-var _ = fmt.Sprint
+// ---------------------------------------------------------------- automatic scaling
+
+// AutoView is the dashboard's view of the automatic-scaling decision.
+type AutoView struct {
+	Mode      string   `json:"mode"` // balancing | mirroring | redundant | single | direct | none
+	Copies    int      `json:"copies"`
+	Direct    bool     `json:"direct"`
+	DirectVia string   `json:"directVia,omitempty"`
+	Benched   []string `json:"benched,omitempty"`
+}
+
+func autoCopies(p *bond.Plan) int {
+	if p == nil {
+		return 0
+	}
+	return p.Copies
+}
+
+func autoMode(p *bond.Plan) string {
+	if p == nil {
+		return ""
+	}
+	return p.Mode
+}
+
+// directViaName is the interface used when automatic scaling went direct.
+func (c *Client) directViaName() string {
+	p := c.plan.Load()
+	if p == nil || !p.Direct {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, l := range c.links {
+		if l.id == p.DirectVia {
+			return l.iface.Name
+		}
+	}
+	return ""
+}
+
+func autoBenched(p *bond.Plan) []uint8 {
+	if p == nil {
+		return nil
+	}
+	return p.BenchedID
+}
+
+// autoScale runs once per second: it turns link reliabilities into a plan
+// (copies, benched links, direct bypass) and applies it here and, via the
+// policy message, on the server.
+func (c *Client) autoScale(now time.Time, cfg *config.Client, e *bond.Engine, links []*clink) {
+	b := cfg.Bonding
+	if b.Mode != string(sched.ModeSmart) || !b.AutoScale {
+		if old := c.plan.Swap(nil); old != nil {
+			for _, l := range links {
+				l.link.SetBenched(false)
+			}
+			c.applyPolicy(e, cfg)
+			c.policySent.Store(0)
+			if old.Direct {
+				go c.applyTunnel()
+			}
+		}
+		return
+	}
+	var ls []bond.LinkRel
+	for _, l := range links {
+		var r float64
+		l.link.Health(func(h *bond.Health) { r = h.Reliability })
+		ls = append(ls, bond.LinkRel{ID: l.id, Usable: l.link.State().Usable(), Rel: r, Metered: l.link.Metered()})
+	}
+	p := c.auto.Update(now, ls, bond.AutoParams{
+		Target:           b.TargetDeliveryPct / 100,
+		BenchBelow:       b.BenchBelowPct / 100,
+		RejoinAbove:      b.RejoinAbovePct / 100,
+		DirectWhenSingle: b.DirectWhenSingle,
+		DirectAfter:      time.Duration(b.DirectAfterSec) * time.Second,
+		BondAfter:        time.Duration(b.BondAfterSec) * time.Second,
+		CopiesDownAfter:  time.Duration(b.CopiesDownAfterSec) * time.Second,
+	})
+	for _, l := range links {
+		l.link.SetBenched(p.Benched[l.id])
+	}
+	old := c.plan.Swap(&p)
+	changed := old == nil || old.Copies != p.Copies || old.Direct != p.Direct || old.DirectVia != p.DirectVia ||
+		fmt.Sprint(old.BenchedID) != fmt.Sprint(p.BenchedID)
+	if !changed {
+		return
+	}
+	var benchedNames []string
+	for _, l := range links {
+		if p.Benched[l.id] {
+			benchedNames = append(benchedNames, l.iface.Name)
+		}
+	}
+	c.log.Info("automatic scaling", "mode", p.Mode, "copies", p.Copies, "benched", strings.Join(benchedNames, ","), "direct", p.Direct)
+	c.applyPolicy(e, cfg)
+	c.policySent.Store(0) // tell the server now
+	if old == nil || old.Direct != p.Direct || (p.Direct && old.DirectVia != p.DirectVia) {
+		go c.applyTunnel()
+	}
+}

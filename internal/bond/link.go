@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rayzorben/bond007/internal/metrics"
+	"github.com/rayzorben/net-bond-007/internal/metrics"
 )
 
 type State uint8
@@ -34,9 +34,17 @@ type Link struct {
 	Name string
 	Kind string
 
-	state  atomic.Uint32
-	weight atomic.Uint64 // math.Float64bits
-	backup atomic.Bool
+	state   atomic.Uint32
+	weight  atomic.Uint64 // math.Float64bits
+	backup  atomic.Bool
+	benched atomic.Bool
+
+	// Metered links (phone tethering, capped data plans) carry at most a
+	// share of the traffic, banked as a byte budget, except as failover.
+	metered    atomic.Bool
+	meterShare atomic.Uint64 // math.Float64bits of 0..1
+	meterMu    sync.Mutex
+	meterBank  float64 // bytes this link may still carry
 
 	queue chan []byte
 	done  chan struct{}
@@ -56,9 +64,12 @@ type Link struct {
 
 	// Pacer limits how fast this link is fed; see pacer.go.
 	Pacer Pacer
+	// Shaper smooths bursts to the delivery rate; see shaper.go.
+	Shaper Shaper
 
 	owd    atomic.Int64 // estimated one-way delay, nanoseconds
 	rxBusy atomic.Bool  // carried real traffic in the last tick
+	quiet  bool         // last seen quiet/down by the reinjection check (nackLoop only)
 }
 
 // SilencePenalty is how much a link's expected delivery time should grow
@@ -90,14 +101,50 @@ func (l *Link) SilencePenalty(nowN int64) time.Duration {
 // Silent reports whether the link is past its silence grace period.
 func (l *Link) Silent(nowN int64) bool { return l.SilencePenalty(nowN) > 0 }
 
+// QuietVs reports whether the link has gone quiet while other links are
+// still heard: nothing received for its grace period, and another link has
+// received since. (Comparing with the others avoids calling every link quiet
+// when the whole connection is merely idle.)
+func (l *Link) QuietVs(all []*Link, nowN int64) bool {
+	if !l.Silent(nowN) {
+		return false
+	}
+	last := l.LastRx.Load()
+	grace := nowN - last - int64(l.SilencePenalty(nowN)) // the grace period
+	for _, o := range all {
+		if o != l && o.LastRx.Load()-last > grace {
+			return true
+		}
+	}
+	return false
+}
+
 // SetOneWayDelay records the link's estimated one-way latency (RTT/2).
 func (l *Link) SetOneWayDelay(d time.Duration) { l.owd.Store(int64(d)) }
+
+// QueueDrain estimates how long the link's send queue takes to drain.
+func (l *Link) QueueDrain(now time.Time) time.Duration {
+	q := len(l.queue)
+	if q == 0 {
+		return 0
+	}
+	r := max(l.Shaper.ActiveRate(now), l.Pacer.Rate())
+	if r <= 0 {
+		return 0 // rate unknown (pacing off): Congested() still guards the queue
+	}
+	return time.Duration(float64(q*1300*8) / r * float64(time.Second))
+}
 
 // ArrivalDelay estimates when a packet queued now would arrive: one-way
 // latency plus the time to drain our own send queue. Pacing debt is not
 // counted: the primary copy is never paced, and counting debt once made a
 // healthy link look slower than a 2-second one.
 func (l *Link) ArrivalDelay(now time.Time) time.Duration {
+	if d := l.QueueDrain(now); d > 0 {
+		// Real drain time at the link's learned rate: a slow link with a
+		// queue must not look "fast" just because its base latency is low.
+		return time.Duration(l.owd.Load()) + d
+	}
 	return time.Duration(l.owd.Load()) + time.Duration(len(l.queue))*100*time.Microsecond
 }
 
@@ -116,6 +163,9 @@ type Health struct {
 	RemoteAddr string
 	Label      string
 	WinShare   float64 // fraction of unique packets this link delivered first (last interval)
+	// Reliability is the long-run delivery score used by automatic scaling
+	// (set by the side that measures it: the client).
+	Reliability float64
 }
 
 func newLink(id uint8, name, kind string, queueCap int, send func([]byte) error, pool *sync.Pool, history int) *Link {
@@ -139,6 +189,9 @@ func (l *Link) writer() {
 		case <-l.done:
 			return
 		case f := <-l.queue:
+			if d := l.Shaper.Delay(len(f), time.Now()); d > 0 {
+				time.Sleep(d)
+			}
 			if err := l.send(f); err != nil {
 				l.Errors.Add(1)
 				s := err.Error()
@@ -165,7 +218,64 @@ func (l *Link) State() State     { return State(l.state.Load()) }
 func (l *Link) SetState(s State) { l.state.Store(uint32(s)) }
 func (l *Link) Backup() bool     { return l.backup.Load() }
 func (l *Link) SetBackup(b bool) { l.backup.Store(b) }
-func (l *Link) Weight() float64  { return math.Float64frombits(l.weight.Load()) }
+
+// SetMetered marks the link as metered with the share of traffic it may
+// carry (0 = failover only).
+func (l *Link) SetMetered(on bool, share float64) {
+	l.metered.Store(on)
+	l.meterShare.Store(math.Float64bits(max(0, min(1, share))))
+}
+
+func (l *Link) Metered() bool       { return l.metered.Load() }
+func (l *Link) MeterShare() float64 { return math.Float64frombits(l.meterShare.Load()) }
+
+const maxMeterBank = 2 << 20 // bytes: allow short bursts, not hoarding
+
+// minAltBps: an unmetered link slower than this (a struggling campground
+// Wi-Fi) is not a real alternative to a metered failover link.
+const minAltBps = 3e6
+
+// IsAlternative reports whether this unmetered link can stand in for a
+// metered one: up, trusted (not benched), still talking, and with useful
+// capacity. (Degraded alone doesn't disqualify: a loaded Starlink often reads
+// degraded while still moving 40 Mbit.) While none is, metered links carry
+// everything.
+func (l *Link) IsAlternative(all []*Link, nowN int64) bool {
+	if l.Metered() || !l.State().Usable() || l.Benched() || l.QuietVs(all, nowN) {
+		return false
+	}
+	r := l.Pacer.Rate()
+	if r == 0 {
+		l.Health(func(h *Health) { r = h.CapBps })
+	}
+	return r == 0 || r >= minAltBps
+}
+
+// earnMeter credits the link with its share of a packet sent on the bond.
+func (l *Link) earnMeter(n int) {
+	if s := l.MeterShare(); s > 0 {
+		l.meterMu.Lock()
+		l.meterBank = min(maxMeterBank, l.meterBank+float64(n)*s)
+		l.meterMu.Unlock()
+	}
+}
+
+func (l *Link) meterHas(n int) bool {
+	l.meterMu.Lock()
+	defer l.meterMu.Unlock()
+	return l.meterBank >= float64(n)
+}
+
+func (l *Link) spendMeter(n int) {
+	l.meterMu.Lock()
+	l.meterBank -= float64(n)
+	l.meterMu.Unlock()
+}
+
+// Benched: automatic scaling stopped using this link (it is still probed).
+func (l *Link) Benched() bool     { return l.benched.Load() }
+func (l *Link) SetBenched(b bool) { l.benched.Store(b) }
+func (l *Link) Weight() float64   { return math.Float64frombits(l.weight.Load()) }
 func (l *Link) SetWeight(w float64) {
 	l.weight.Store(math.Float64bits(w))
 }

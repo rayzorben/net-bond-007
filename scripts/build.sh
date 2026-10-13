@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Build every Bond007 deliverable into dist/release:
-#   - Windows   bond007-<v>-windows-{amd64,arm64}.zip   (self-installing exe)
-#   - macOS     bond007-<v>-macos-{arm64,amd64}.tar.gz  (double-click installer)
+# Build every Net-Bond-007 deliverable into dist/release:
+#   - Windows   net-bond-007-<v>-windows-{amd64,arm64}.zip   (self-installing exe)
+#   - macOS     net-bond-007-<v>-macos-{arm64,amd64}.tar.gz  (double-click installer)
 #   - Linux     .deb / .rpm / Arch packages + .tar.gz   (amd64, arm64)
 #   - OpenWrt   .ipk for GL.iNet Slate AX (aarch64_cortex-a53) and others
-#   - Server    Docker image bond007-server:<v> (+ linux binaries)
+#   - Server    Docker image net-bond-007-server:<v> (+ linux binaries)
 # Requires Go and Node. Skips Docker if it is not available. SKIP_TESTS=1 to skip tests.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION=${VERSION:-0.1.0}
+VERSION=${VERSION:-$(cat internal/version/VERSION)}
 OUT=dist/release
 NFPM=${NFPM:-.cache/bin/nfpm}
 LDFLAGS="-s -w -X main.version=$VERSION"
@@ -36,10 +36,10 @@ fi
 
 rm -rf "$OUT" && mkdir -p "$OUT" dist/bin
 build() { # os arch [goarm|gomips] -> path
-  local os=$1 arch=$2 extra=${3:-} out="dist/bin/$1-$2${3:+-$3}/bond007"
+  local os=$1 arch=$2 extra=${3:-} out="dist/bin/$1-$2${3:+-$3}/net-bond-007"
   [ "$os" = windows ] && out="$out.exe"
   mkdir -p "$(dirname "$out")"
-  GOOS=$os GOARCH=$arch GOARM=${extra#v} GOMIPS=softfloat go build -trimpath -ldflags "$LDFLAGS" -o "$out" ./cmd/bond007
+  GOOS=$os GOARCH=$arch GOARM=${extra#v} GOMIPS=softfloat go build -trimpath -ldflags "$LDFLAGS" -o "$out" ./cmd/net-bond-007
   echo "$out"
 }
 
@@ -47,22 +47,22 @@ step "Windows"
 for a in amd64 arm64; do
   b=$(build windows $a); d=$(mktemp -d)
   cp "$b" packaging/windows/README.txt "$d/"
-  (cd "$d" && python3 -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.')" "$OLDPWD/$OUT/bond007-$VERSION-windows-$a")
+  (cd "$d" && python3 -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.')" "$OLDPWD/$OUT/net-bond-007-$VERSION-windows-$a")
   rm -rf "$d"
 done
 
 step "macOS"
 for a in arm64 amd64; do
-  b=$(build darwin $a); d=$(mktemp -d)/Bond007; mkdir -p "$d"
+  b=$(build darwin $a); d=$(mktemp -d)/Net-Bond-007; mkdir -p "$d"
   cp "$b" "$d/"; cp packaging/macos/*.command "$d/"
-  tar -C "$(dirname "$d")" -czf "$OUT/bond007-$VERSION-macos-$a.tar.gz" Bond007
+  tar -C "$(dirname "$d")" -czf "$OUT/net-bond-007-$VERSION-macos-$a.tar.gz" Net-Bond-007
 done
 
 step "Linux"
 for a in amd64 arm64; do
-  b=$(build linux $a); d=$(mktemp -d)/bond007-$VERSION-linux-$a; mkdir -p "$d"
+  b=$(build linux $a); d=$(mktemp -d)/net-bond-007-$VERSION-linux-$a; mkdir -p "$d"
   cp "$b" packaging/linux/install.sh "$d/"
-  tar -C "$(dirname "$d")" -czf "$OUT/bond007-$VERSION-linux-$a.tar.gz" "$(basename "$d")"
+  tar -C "$(dirname "$d")" -czf "$OUT/net-bond-007-$VERSION-linux-$a.tar.gz" "$(basename "$d")"
   for p in deb rpm archlinux; do
     pkg packaging/nfpm-linux.yaml $p "$b" $a
   done
@@ -86,12 +86,12 @@ done
 
 step "Server"
 for a in amd64 arm64; do
-  GOOS=linux GOARCH=$a go build -trimpath -ldflags "$LDFLAGS" -o "dist/bin/server-linux-$a/bond007-server" ./cmd/bond007-server
-  tar -C "dist/bin/server-linux-$a" -czf "$OUT/bond007-server-$VERSION-linux-$a.tar.gz" bond007-server
+  GOOS=linux GOARCH=$a go build -trimpath -ldflags "$LDFLAGS" -o "dist/bin/server-linux-$a/net-bond-007-server" ./cmd/net-bond-007-server
+  tar -C "dist/bin/server-linux-$a" -czf "$OUT/net-bond-007-server-$VERSION-linux-$a.tar.gz" net-bond-007-server
 done
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-  docker build -q --build-arg VERSION="$VERSION" -t "bond007-server:$VERSION" -t bond007-server:latest . >/dev/null
-  echo "docker image bond007-server:$VERSION"
+  docker build -q --build-arg VERSION="$VERSION" -t "net-bond-007-server:$VERSION" -t net-bond-007-server:latest . >/dev/null
+  echo "docker image net-bond-007-server:$VERSION"
 else
   echo "docker not available: skipped image (Dockerfile is ready)"
 fi

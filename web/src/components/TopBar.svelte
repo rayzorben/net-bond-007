@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Sun, Moon, LogOut, LayoutDashboard, SlidersHorizontal, ScrollText } from '@lucide/svelte'
+  import { Sun, Moon, LogOut, LayoutDashboard, SlidersHorizontal, ScrollText, Waypoints, CalendarClock } from '@lucide/svelte'
   import { store, toggleTheme } from '../lib/store.svelte'
   import { bps } from '../lib/format'
 
@@ -14,19 +14,30 @@
     const up = st.links.filter((l) => l.state === 'up' || l.state === 'degraded').length
     return connected ? `Bonded · ${up} link${up === 1 ? '' : 's'}` : 'Connecting…'
   })
+  const myVer = $derived(store.info?.version ?? '')
+  const peerVer = $derived(st?.role === 'client' ? st.server.version ?? '' : '')
+  const mismatch = $derived(!!peerVer && !!myVer && peerVer !== myVer)
+  const clientVers = $derived(st?.role === 'server' ? [...new Set(st.sessions.map((s) => s.version))].filter((v) => v !== myVer) : [])
   const rate = $derived(st?.role === 'client' ? st.engine.rxBps + st.engine.txBps : store.totals.at(-1) ? store.totals.at(-1)!.rx + store.totals.at(-1)!.tx : 0)
-  const tabs = [
+  type Page = typeof store.page
+  const tabs: { id: Page; label: string; icon: any }[] = $derived([
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'connections', label: 'Connections', icon: Waypoints },
+    ...(store.info?.role === 'server' ? [{ id: 'history', label: 'History', icon: CalendarClock }] : []),
     { id: 'settings', label: 'Settings', icon: SlidersHorizontal },
     { id: 'logs', label: 'Logs', icon: ScrollText },
-  ] as const
+  ] as { id: Page; label: string; icon: any }[])
 </script>
 
 <header class="top">
   <div class="brand">
-    <svg viewBox="0 0 64 64" width="26" height="26" aria-hidden="true"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs><circle cx="32" cy="32" r="28" fill="none" stroke="url(#bg)" stroke-width="5"/><circle cx="32" cy="32" r="16" fill="none" stroke="url(#bg)" stroke-width="3" stroke-dasharray="6 5" class="barrel"/><circle cx="32" cy="32" r="6.5" fill="url(#bg)"/></svg>
-    <span class="word">BOND<span class="grad-text">007</span></span>
+    <img class="mark" src="/mark.png" width="30" height="30" alt="" />
+    <span class="word">NET-BOND-<span class="grad-text">007</span></span>
     {#if store.info?.role === 'server'}<span class="chip accent">server</span>{/if}
+    <span class="ver chip" class:warn={mismatch || clientVers.length > 0}
+      title={mismatch ? `This client runs v${myVer} but the server runs v${peerVer}` : clientVers.length ? `Some clients run a different version: ${clientVers.join(', ')}` : 'Running version'}>
+      v{myVer}{#if peerVer}<span class="sep">·</span>server v{peerVer}{/if}{#if mismatch || clientVers.length}&nbsp;⚠{/if}
+    </span>
   </div>
   <nav>
     {#each tabs as t}
@@ -55,7 +66,9 @@
   }
   .brand { display: flex; align-items: center; gap: 9px; }
   .word { font-weight: 780; letter-spacing: 0.06em; font-size: 15px; }
-  .barrel { transform-origin: 32px 32px; animation: spin 14s linear infinite; }
+  .ver { font-family: var(--mono); font-size: 11px; height: 20px; }
+  .ver .sep { opacity: 0.5; margin: 0 1px; }
+  .mark { display: block; filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.35)); }
   nav { display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; }
   nav button { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 560; font-size: 13px; cursor: pointer; }
   nav button:hover { color: var(--text); }

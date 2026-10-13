@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"sync"
@@ -98,6 +99,9 @@ func ConfigureTunnel(t TunnelSpec) (func(), error) {
 	}
 	for _, r := range t.Routes {
 		run("route", "-q", "-n", "delete", "-net", r.String())
+		if t.Direct {
+			continue // leave it to the OS default route
+		}
 		if err := run("route", "-q", "-n", "add", "-net", r.String(), "-interface", t.Name); err != nil {
 			return func() {}, err
 		}
@@ -108,8 +112,12 @@ func ConfigureTunnel(t TunnelSpec) (func(), error) {
 }
 
 func DefaultConfigPath(role string) string {
-	return "/Library/Application Support/Bond007/" + role + ".json"
+	return "/Library/Application Support/Net-Bond-007/" + role + ".json"
 }
 
 // TunName: macOS only allows utun devices; the kernel picks the number.
 func TunName(string) string { return "utun" }
+
+// DefaultGateway is not needed here: in direct mode the tunnel's routes are
+// simply not installed, so traffic follows the OS default route.
+func DefaultGateway(string) netip.Addr { return netip.Addr{} }

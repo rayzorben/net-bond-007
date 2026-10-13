@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bond007 lab: a client and a server in two Linux network namespaces joined
+# Net-Bond-007 lab: a client and a server in two Linux network namespaces joined
 # by three emulated links with different latency, bandwidth and loss. Your
 # host's networking is untouched. Requires root (sudo) and iproute2 with netem.
 #
@@ -14,9 +14,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN=${BIN:-dist/local}
 CLI=b7cli SRV=b7srv
-LAB=/tmp/bond007-lab
-# name  subnet  one-way-delay  rate  loss
-LINKS=("eth1 1 13ms 120mbit 0%" "wlan1 2 23ms 80mbit 0.5%" "usb1 3 50ms 30mbit 1%")
+LAB=/tmp/net-bond-007-lab
+# name  subnet  one-way-delay  rate  loss  [queue-limit-packets] [jitter]
+# PROFILE=lab (default): three clean-ish links with deep buffers.
+# PROFILE=starlink: what the GL Slate AX actually sees in the field: Starlink
+#   (~76ms RTT, jitter, ~40 Mbit with a SHALLOW buffer so bursts drop) plus a
+#   terrible campground Wi-Fi.
+PROFILE=${PROFILE:-lab}
+case "$PROFILE" in
+  starlink) LINKS=("eth1 1 38ms 40mbit 0.2% 150 6ms" "wlan1 2 25ms 1200kbit 7% 100 10ms") ;; # campground Wi-Fi as measured: ~1.2 Mbit, ~13% round-trip loss
+  field)    LINKS=("eth1 1 38ms 40mbit 0.2% 150 6ms" "wlan1 2 25ms 1200kbit 7% 100 10ms" "usb1 3 55ms 30mbit 0% 300 8ms") ;; # + iPhone USB tether (mark usb1 metered)
+  *)        LINKS=("eth1 1 13ms 120mbit 0% 2000 0ms" "wlan1 2 23ms 80mbit 0.5% 2000 0ms" "usb1 3 50ms 30mbit 1% 2000 0ms") ;;
+esac
 
 ns() { ip netns exec "$@"; }
 
@@ -31,13 +40,13 @@ up() {
   ns $SRV ip link add inet0 type dummy; ns $SRV ip addr add 198.51.100.10/32 dev inet0; ns $SRV ip link set inet0 up
 
   for spec in "${LINKS[@]}"; do
-    read -r name n delay rate loss <<<"$spec"
+    read -r name n delay rate loss qlim jit <<<"$spec"
     ip link add "$name" netns $CLI type veth peer name "s$n" netns $SRV
     ns $CLI ip addr add "10.201.$n.2/24" dev "$name"; ns $CLI ip link set "$name" up
     ns $SRV ip addr add "10.201.$n.1/24" dev "s$n"; ns $SRV ip link set "s$n" up
     ns $CLI ip route add default via "10.201.$n.1" dev "$name" metric $((n*10))
-    ns $CLI tc qdisc add dev "$name" root netem delay "$delay" rate "$rate" loss "$loss" limit 2000
-    ns $SRV tc qdisc add dev "s$n" root netem delay "$delay" rate "$rate" loss "$loss" limit 2000
+    ns $CLI tc qdisc add dev "$name" root netem delay "$delay" "$jit" rate "$rate" loss "$loss" limit 2000
+    ns $SRV tc qdisc add dev "s$n" root netem delay "$delay" "$jit" rate "$rate" loss "$loss" limit "$qlim"
   done
 
   # Management links so the dashboards are reachable from the host.
@@ -47,6 +56,12 @@ up() {
   ip link add b7m-srv type veth peer name mgmt0 netns $SRV
   ip addr add 10.250.1.1/30 dev b7m-srv; ip link set b7m-srv up
   ns $SRV ip addr add 10.250.1.2/30 dev mgmt0; ns $SRV ip link set mgmt0 up
+
+  # Big CDNs pace their TCP (BBR); emulate that for the "internet" host.
+  if [ "$PROFILE" = starlink ]; then
+    modprobe tcp_bbr 2>/dev/null || true
+    ns $SRV sysctl -qw net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true
+  fi
 
   # Test payload served by the pretend internet host.
   mkdir -p $LAB/www && head -c 50M /dev/urandom > $LAB/www/50M.bin
@@ -58,16 +73,16 @@ up() {
 EOF
   cat > $LAB/client.json <<EOF
 {"name":"lab-client","server":{"address":"10.200.0.1:7007","token":"lab-token","enabled":true},
- "tunnel":{"interfaceName":"bond007","mtu":1380,"fullTunnel":true},
- "interfaces":{"autoAdd":true,"scanMs":2000,"exclude":"lo*,mgmt*,bond007*"},
+ "tunnel":{"interfaceName":"net-bond-007","mtu":1380,"fullTunnel":true},
+ "interfaces":{"autoAdd":true,"scanMs":2000,"exclude":"lo*,mgmt*,net-bond-007*"},
  "ui":{"listen":"10.250.0.2:7007","refreshMs":500}}
 EOF
-  ns $SRV "$BIN/bond007-server" --config $LAB/server.json >$LAB/server.log 2>&1 &
+  ns $SRV "$BIN/net-bond-007-server" --config $LAB/server.json >$LAB/server.log 2>&1 &
   sleep 0.5
-  ns $CLI "$BIN/bond007" run --config $LAB/client.json >$LAB/client.log 2>&1 &
+  ns $CLI "$BIN/net-bond-007" run --config $LAB/client.json >$LAB/client.log 2>&1 &
   echo "waiting for the bond..."
   for _ in $(seq 1 40); do
-    ns $CLI ip -4 addr show dev bond007 2>/dev/null | grep -q inet && break
+    ns $CLI ip -4 addr show dev net-bond-007 2>/dev/null | grep -q inet && break
     sleep 0.25
   done
   sleep 1
@@ -100,13 +115,19 @@ test_dl() {
   status
 }
 
+# Baseline without the bond: same download straight over one link.
+direct() {
+  local ifc=${1:-eth1}
+  ns $CLI curl -s --interface "$ifc" -o /dev/null -m 120 -w "direct via $ifc: %{time_total}s %{speed_download} B/s\n" http://198.51.100.10/50M.bin
+}
+
 cut_link()  { ns $CLI ip link set "$1" down; echo "$1 unplugged"; }
 mend_link() { ns $CLI ip link set "$1" up; ns $CLI ip route add default via "10.201.$(link_n "$1").1" dev "$1" metric 50 2>/dev/null || true; echo "$1 restored"; }
 link_n() { for spec in "${LINKS[@]}"; do read -r name n _ <<<"$spec"; [[ $name == "$1" ]] && echo "$n"; done; }
 
 down() {
-  pkill -f "bond007-server --config $LAB" 2>/dev/null || true
-  pkill -f "bond007 run --config $LAB" 2>/dev/null || true
+  pkill -f "net-bond-007-server --config $LAB" 2>/dev/null || true
+  pkill -f "net-bond-007 run --config $LAB" 2>/dev/null || true
   pkill -f "http.server 80 --bind 198.51.100.10" 2>/dev/null || true
   ip link del b7m-cli 2>/dev/null || true
   ip link del b7m-srv 2>/dev/null || true
@@ -117,7 +138,7 @@ down() {
 
 case "${1:-}" in
   up) up ;; down) down ;; status) status ;; test) test_dl ;;
-  cut) cut_link "$2" ;; mend) mend_link "$2" ;;
+  cut) cut_link "$2" ;; mend) mend_link "$2" ;; direct) direct "${2:-eth1}" ;;
   logs) tail -n 50 $LAB/client.log $LAB/server.log ;;
   *) sed -n '2,13p' "$0"; exit 2 ;;
 esac

@@ -4,7 +4,11 @@ export interface LinkView {
   id: number; name: string; label?: string; kind: string; state: string
   backup: boolean; weight: number
   rttMs: number; minRttMs: number; jitterMs: number; lossPct: number; quality: number
-  txBps: number; rxBps: number; capBps: number; paceBps: number
+  txBps: number; rxBps: number; capBps: number; paceBps: number; shapeBps: number
+  benched: boolean; reliability: number
+  metered?: boolean; meterShare?: number
+  tested?: { downBps: number; upBps: number; pingMs: number; at: string }
+  usage?: { usedBytes: number; capBytes?: number; cycleStart: string; overCap?: boolean }
   txBytes: number; rxBytes: number; txPackets: number; rxPackets: number
   wins: number; dups: number; drops: number; errors: number; winShare: number; queue: number
   local?: string; remote?: string; lastError?: string
@@ -17,6 +21,8 @@ export interface EngineView {
   noLinkDrops: number; reorderHoldMs: number; reorderHeld: number
   reorderInOrder: number; reorderWaited: number; reorderSkipped: number; reorderLate: number
   mode: string; redundancy: number
+  arq: boolean; retransmits: number; nacksSent: number; nacksRecv: number
+  gapsDetected: number; gapsRecovered: number; gapsGaveUp: number
 }
 
 export interface IfaceView {
@@ -32,6 +38,7 @@ export interface ClientState {
   links: LinkView[]
   interfaces: IfaceView[]
   warnings: string[]
+  auto?: { mode: string; copies: number; direct: boolean; directVia?: string; benched?: string[] }
 }
 
 export interface SessionView {

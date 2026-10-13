@@ -8,13 +8,15 @@
   import ServerOverview from './pages/ServerOverview.svelte'
   import Settings from './pages/Settings.svelte'
   import Logs from './pages/Logs.svelte'
+  import Connections from './pages/Connections.svelte'
+  import History from './pages/History.svelte'
 
   let bootErr = $state('')
   onMount(() => { store.boot().catch((e) => (bootErr = String(e))) })
 </script>
 
 {#if bootErr}
-  <div class="center"><p>Cannot reach Bond007: {bootErr}</p></div>
+  <div class="center"><p>Cannot reach Net-Bond-007: {bootErr}</p></div>
 {:else if !store.authed}
   <Login />
 {:else}
@@ -24,6 +26,10 @@
       <Settings />
     {:else if store.page === 'logs'}
       <Logs />
+    {:else if store.page === 'connections'}
+      <Connections />
+    {:else if store.page === 'history'}
+      <History />
     {:else if store.state?.role === 'client'}
       <ClientOverview st={store.state} />
     {:else if store.state?.role === 'server'}

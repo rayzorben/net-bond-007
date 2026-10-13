@@ -17,7 +17,8 @@
   const winRatio = $derived(link.wins + link.dups ? link.wins / (link.wins + link.dups) : 0)
 
   // ---- per-link settings (client only) ----
-  let lc = $state<{ disabled?: boolean; backup?: boolean; weight?: number; label?: string; maxMbps?: number }>({})
+  let lc = $state<{ disabled?: boolean; backup?: boolean; weight?: number; label?: string; maxMbps?: number
+    metered?: boolean; sharePct?: number; monthlyCapGB?: number; cycleDay?: number }>({})
   let loadedFor = ''
   $effect(() => {
     if (loadedFor !== link.name) {
@@ -38,7 +39,7 @@
   const counters = $derived([
     ['Link id', String(link.id)], ['Interface', link.name], ['Kind', kindLabel[link.kind] ?? link.kind],
     ['Local address', link.local || '—'], ['Remote address', link.remote || '—'],
-    ['State', link.state], ['Scheduling weight', link.weight.toFixed(2)], ['Capacity estimate', bps(link.capBps)], ['Paced rate (learned)', link.paceBps ? bps(link.paceBps) : 'off'],
+    ['State', link.state], ['Scheduling weight', link.weight.toFixed(2)], ['Capacity estimate', bps(link.capBps)], ['Paced rate (learned)', link.paceBps ? bps(link.paceBps) : 'off'], ['Burst smoothing', link.shapeBps ? bps(link.shapeBps) : 'not needed'],
     ['RTT (smoothed)', ms(link.rttMs)], ['RTT (min)', ms(link.minRttMs)], ['Jitter', ms(link.jitterMs)], ['Probe loss', pct(link.lossPct, 2)],
     ['Bytes sent', bytes(link.txBytes)], ['Bytes received', bytes(link.rxBytes)],
     ['Packets sent', count(link.txPackets)], ['Packets received', count(link.rxPackets)],
@@ -88,6 +89,40 @@
           <div><b>Backup only</b><span>Carry traffic only when every primary link is down (e.g. metered cellular).</span></div>
           <Toggle checked={!!lc.backup} onchange={(v) => { lc.backup = v; save(true) }} label="Backup only" />
         </label>
+        <label class="row">
+          <div><b>Metered (capped data plan)</b><span>Phone hotspot or capped cellular. Carries only a small share while other links work, and <em>everything</em> the moment they don't. Never switched off.</span></div>
+          <Toggle checked={!!lc.metered} onchange={(v) => { lc.metered = v; if (v && lc.sharePct === undefined) lc.sharePct = 10; save(true) }} label="Metered" />
+        </label>
+        {#if lc.metered}
+          <div class="row col metered">
+            <div class="rowhead">
+              <div><b>Share while others work</b><span>Mirror copies and speed boost, as % of bond traffic. 0 = failover only.</span></div>
+            </div>
+            <div class="slider">
+              <input type="range" min="0" max="100" step="1" value={lc.sharePct ?? 10} oninput={(e) => { lc.sharePct = +e.currentTarget.value; save() }} />
+              <b class="num">{lc.sharePct ?? 10}%</b>
+            </div>
+          </div>
+          <div class="row">
+            <div><b>Monthly allowance</b><span>GB for sharing/boost. When reached, it becomes failover-only until the cycle resets. 0 = no limit.</span></div>
+            <input class="input" type="number" min="0" step="1" style="max-width:120px" bind:value={lc.monthlyCapGB} oninput={() => save()} />
+          </div>
+          <div class="row">
+            <div><b>Billing cycle starts on day</b><span>Usage resets on this day each month.</span></div>
+            <input class="input" type="number" min="1" max="28" step="1" style="max-width:120px" value={lc.cycleDay || 1} oninput={(e) => { lc.cycleDay = Math.min(28, Math.max(1, +e.currentTarget.value || 1)); save() }} />
+          </div>
+          {#if link.usage}
+            {@const cap = link.usage.capBytes ?? 0}
+            <div class="row col">
+              <div class="rowhead">
+                <div><b>Used this cycle</b><span>Since {new Date(link.usage.cycleStart).toLocaleDateString()} · includes failover traffic</span></div>
+                <b class="num" class:bad={link.usage.overCap}>{bytes(link.usage.usedBytes)}{cap ? ` / ${bytes(cap)}` : ''}</b>
+              </div>
+              {#if cap}<div class="usage"><i class:over={link.usage.overCap} style="width:{Math.min(100, (link.usage.usedBytes / cap) * 100)}%"></i></div>{/if}
+              {#if link.usage.overCap}<span class="note">Allowance reached — failover only.</span>{/if}
+            </div>
+          {/if}
+        {/if}
         <div class="row">
           <div><b>Name</b><span>A friendly label for the dashboard.</span></div>
           <input class="input" style="max-width:200px" placeholder={link.name} bind:value={lc.label} oninput={() => save()} />
@@ -179,6 +214,11 @@
   .row span { font-size: 12px; color: var(--muted); }
   .slider { display: flex; align-items: center; gap: 12px; }
   .slider b { min-width: 40px; text-align: right; }
+  .usage { height: 8px; border-radius: 99px; background: var(--surface-2, rgba(127,127,127,.15)); overflow: hidden; margin-top: 8px; }
+  .usage i { display: block; height: 100%; background: var(--cyan); border-radius: inherit; }
+  .usage i.over { background: var(--warn); }
+  .note { color: var(--warn); font-size: 12px; margin-top: 6px; display: block; }
+  .num.bad { color: var(--bad); }
   .chartc { padding: 14px 16px 10px; display: grid; gap: 8px; }
   .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
   .scroll > :global(*) { min-width: 0; }

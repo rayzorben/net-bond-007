@@ -2,7 +2,7 @@
 
 This survey is from the author's working knowledge of these projects as of 2026. Verify details against each project's current documentation before relying on them.
 
-| Project | Approach | What Bond007 takes from it |
+| Project | Approach | What Net-Bond-007 takes from it |
 |---|---|---|
 | **Speedify** (Connectify, commercial) | A proprietary UDP tunnel with per-packet bonding across all interfaces. It has a "redundant" mode (duplicate everything), a "speed" mode, and "streaming" mode, which adapts redundancy for detected real-time flows. Clients on Windows, macOS, Linux, iOS and Android. | Packet-level bonding over UDP; per-mode redundancy; mirroring real-time media automatically (`realtimeMirror`); live per-link latency, loss and usage UI. |
 | **Peplink SpeedFusion** (commercial routers) | Bonded VPN with "Bandwidth Bonding", "WAN Smoothing" (duplicate packets across WANs) and "Hot Failover". | WAN-smoothing equals our mirror and redundancy modes. The router-first deployment informed our OpenWrt package. |
