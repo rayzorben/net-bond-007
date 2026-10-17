@@ -200,6 +200,9 @@ func (c *Client) SendPacket(pkt []byte) {
 
 func (c *Client) applyPolicy(e *bond.Engine, cfg *config.Client) {
 	e.SetARQ(cfg.Bonding.Retransmit)
+	// Upstream FEC only toward a server that understands it.
+	a := c.ack.Load()
+	e.SetFEC(cfg.Bonding.FEC && a != nil && a.FEC)
 	ports, _ := sched.ParsePorts(cfg.Bonding.RealtimePorts)
 	mode, red := sched.Mode(cfg.Bonding.Mode), cfg.Bonding.Redundancy
 	if p := c.plan.Load(); p != nil && p.Copies > 0 {
@@ -233,6 +236,7 @@ func (c *Client) wirePolicy() proto.Policy {
 		PacingLossPct:          cfg.Bonding.PacingLossPct,
 		Retransmit:             cfg.Bonding.Retransmit,
 		Shaping:                cfg.Bonding.Shaping,
+		FEC:                    cfg.Bonding.FEC,
 		LatencyWeighting:       cfg.Bonding.LatencyWeighting,
 		LinkMaxMbps:            caps,
 		MeteredShare:           c.meteredShares(),
@@ -499,6 +503,11 @@ func (c *Client) onHelloAck(a proto.HelloAck) {
 	}
 	c.epoch = a.Epoch
 	c.mu.Unlock()
+	if prev == nil || prev.FEC != a.FEC {
+		if e := c.engine.Load(); e != nil {
+			c.applyPolicy(e, c.cfg.Get())
+		}
+	}
 	if prev == nil || prev.ClientIP != a.ClientIP || prev.PrefixLen != a.PrefixLen {
 		c.log.Info("connected to server", "server", a.ServerName, "version", a.Version, "tunnel_ip", a.ClientIP)
 		c.policySent.Store(0)

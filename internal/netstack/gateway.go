@@ -372,8 +372,8 @@ func (g *Gateway) TCPInfo() []string {
 	g.eps.Range(func(k, _ any) bool {
 		var ti tcpip.TCPInfoOption
 		if err := k.(tcpip.Endpoint).GetSockOpt(&ti); err == nil {
-			out = append(out, fmt.Sprintf("state=%v cc=%v cwnd=%d ssthresh=%d rtt=%v rttvar=%v rto=%v reorder=%v",
-				ti.State, ti.CcState, ti.SndCwnd, ti.SndSsthresh, ti.RTT, ti.RTTVar, ti.RTO, ti.ReorderSeen))
+			out = append(out, fmt.Sprintf("state=%v cc=%v cwnd=%d ssthresh=%d rtt=%v rttvar=%v rto=%v reorder=%v sndbuf=%d",
+				ti.State, ti.CcState, ti.SndCwnd, ti.SndSsthresh, ti.RTT, ti.RTTVar, ti.RTO, ti.ReorderSeen, k.(tcpip.Endpoint).SocketOptions().GetSendBufferSize()))
 		}
 		return true
 	})

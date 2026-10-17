@@ -125,6 +125,8 @@ func (l *clink) reader() {
 		case proto.TypeNack:
 			l.link.Rx.Add(n)
 			l.e.HandleNack(f)
+		case proto.TypeFEC:
+			l.e.ReceiveFEC(l.link, f)
 		case proto.TypeProbeAck:
 			a, err := proto.ParseProbeAck(f)
 			if err != nil {
@@ -137,6 +139,7 @@ func (l *clink) reader() {
 				l.everAcked = true
 				l.upBytes = a.RxBytes
 			}
+			l.link.SetPeerFECRecovered(a.FECRecovered)
 			l.mu.Unlock()
 			if ok {
 				var srtt time.Duration
@@ -194,7 +197,7 @@ func (l *clink) prober() {
 func (l *clink) sendHello(token string) {
 	f, err := proto.AppendJSON(nil, proto.TypeHello, l.e.Session, l.id, proto.Hello{
 		Token: token, ClientName: l.c.deviceName(), Version: Version, OS: osName(),
-		LinkName: l.iface.Name, LinkKind: l.iface.Kind,
+		LinkName: l.iface.Name, LinkKind: l.iface.Kind, FEC: true,
 	})
 	if err == nil {
 		if _, err := l.conn.Write(f); err != nil {
@@ -221,6 +224,7 @@ func (l *clink) sendProbe(now time.Time) {
 		l.lastRxB, l.lastRxAt = rx, now
 	}
 	p.Weight = uint16(l.downWeight.Load())
+	p.FECRecovered = uint32(l.link.FECRecovered.Load())
 	p.State = uint8(l.link.State())
 	if l.link.Backup() {
 		p.State |= proto.ProbeBackupBit

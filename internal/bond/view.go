@@ -10,45 +10,50 @@ import (
 
 // LinkView is the JSON shape of a link for the dashboard.
 type LinkView struct {
-	ID        uint8            `json:"id"`
-	Name      string           `json:"name"`
-	Label     string           `json:"label,omitempty"`
-	Kind      string           `json:"kind"`
-	State     string           `json:"state"`
-	Backup    bool             `json:"backup"`
-	Disabled  bool             `json:"disabled,omitempty"`
-	Weight    float64          `json:"weight"`
-	RTTms     float64          `json:"rttMs"`
-	MinRTTms  float64          `json:"minRttMs"`
-	JitterMs  float64          `json:"jitterMs"`
-	LossPct   float64          `json:"lossPct"`
-	Quality   float64          `json:"quality"`
-	TxBps     float64          `json:"txBps"`
-	RxBps     float64          `json:"rxBps"`
-	CapBps    float64          `json:"capBps"`
-	PaceBps   float64          `json:"paceBps"`
-	ShapeBps  float64          `json:"shapeBps"`
-	Benched   bool             `json:"benched"`
-	Metered   bool             `json:"metered,omitempty"`
-	Share     float64          `json:"meterShare,omitempty"` // fraction it may carry while others work
-	Usage     *MeterUsage      `json:"usage,omitempty"`      // client only
-	Tested    *TestedSpeed     `json:"tested,omitempty"`     // client only: last speed test
-	Relay     *RelayInfo       `json:"relay,omitempty"`      // client only: phone relay link
-	Reliab    float64          `json:"reliability"`
-	TxBytes   uint64           `json:"txBytes"`
-	RxBytes   uint64           `json:"rxBytes"`
-	TxPackets uint64           `json:"txPackets"`
-	RxPackets uint64           `json:"rxPackets"`
-	Wins      uint64           `json:"wins"`
-	Dups      uint64           `json:"dups"`
-	Drops     uint64           `json:"drops"`
-	Errors    uint64           `json:"errors"`
-	WinShare  float64          `json:"winShare"`
-	Queue     int              `json:"queue"`
-	Local     string           `json:"local,omitempty"`
-	Remote    string           `json:"remote,omitempty"`
-	LastError string           `json:"lastError,omitempty"`
-	History   []metrics.Sample `json:"history,omitempty"`
+	ID       uint8   `json:"id"`
+	Name     string  `json:"name"`
+	Label    string  `json:"label,omitempty"`
+	Kind     string  `json:"kind"`
+	State    string  `json:"state"`
+	Backup   bool    `json:"backup"`
+	Disabled bool    `json:"disabled,omitempty"`
+	Weight   float64 `json:"weight"`
+	RTTms    float64 `json:"rttMs"`
+	MinRTTms float64 `json:"minRttMs"`
+	JitterMs float64 `json:"jitterMs"`
+	LossPct  float64 `json:"lossPct"`
+	Quality  float64 `json:"quality"`
+	TxBps    float64 `json:"txBps"`
+	RxBps    float64 `json:"rxBps"`
+	CapBps   float64 `json:"capBps"`
+	PaceBps  float64 `json:"paceBps"`
+	ShapeBps float64 `json:"shapeBps"`
+	// FEC: current group size (0 = off), parity frames sent, packets the
+	// local side rebuilt from this link's parity.
+	FECGroup     int              `json:"fecGroup"`
+	FECSent      uint64           `json:"fecSent"`
+	FECRecovered uint64           `json:"fecRecovered"`
+	Benched      bool             `json:"benched"`
+	Metered      bool             `json:"metered,omitempty"`
+	Share        float64          `json:"meterShare,omitempty"` // fraction it may carry while others work
+	Usage        *MeterUsage      `json:"usage,omitempty"`      // client only
+	Tested       *TestedSpeed     `json:"tested,omitempty"`     // client only: last speed test
+	Relay        *RelayInfo       `json:"relay,omitempty"`      // client only: phone relay link
+	Reliab       float64          `json:"reliability"`
+	TxBytes      uint64           `json:"txBytes"`
+	RxBytes      uint64           `json:"rxBytes"`
+	TxPackets    uint64           `json:"txPackets"`
+	RxPackets    uint64           `json:"rxPackets"`
+	Wins         uint64           `json:"wins"`
+	Dups         uint64           `json:"dups"`
+	Drops        uint64           `json:"drops"`
+	Errors       uint64           `json:"errors"`
+	WinShare     float64          `json:"winShare"`
+	Queue        int              `json:"queue"`
+	Local        string           `json:"local,omitempty"`
+	Remote       string           `json:"remote,omitempty"`
+	LastError    string           `json:"lastError,omitempty"`
+	History      []metrics.Sample `json:"history,omitempty"`
 }
 
 // RelayInfo describes the phone behind a relay link, from its last hello.
@@ -86,24 +91,27 @@ type MeterUsage struct {
 func (l *Link) View(historyN int) LinkView {
 	v := LinkView{
 		ID: l.ID, Name: l.Name, Kind: l.Kind,
-		State:     l.State().String(),
-		Backup:    l.Backup(),
-		Weight:    l.Weight(),
-		TxBytes:   l.Tx.Bytes.Load(),
-		RxBytes:   l.Rx.Bytes.Load(),
-		TxPackets: l.Tx.Packets.Load(),
-		RxPackets: l.Rx.Packets.Load(),
-		Wins:      l.Wins.Load(),
-		Dups:      l.Dups.Load(),
-		Drops:     l.Drops.Load(),
-		Errors:    l.Errors.Load(),
-		Queue:     l.QueueLen(),
-		LastError: l.LastError(),
-		PaceBps:   l.Pacer.Rate(),
-		ShapeBps:  l.Shaper.ActiveRate(time.Now()),
-		Benched:   l.Benched(),
-		Metered:   l.Metered(),
-		Share:     l.MeterShare(),
+		State:        l.State().String(),
+		Backup:       l.Backup(),
+		Weight:       l.Weight(),
+		TxBytes:      l.Tx.Bytes.Load(),
+		RxBytes:      l.Rx.Bytes.Load(),
+		TxPackets:    l.Tx.Packets.Load(),
+		RxPackets:    l.Rx.Packets.Load(),
+		Wins:         l.Wins.Load(),
+		Dups:         l.Dups.Load(),
+		Drops:        l.Drops.Load(),
+		Errors:       l.Errors.Load(),
+		Queue:        l.QueueLen(),
+		LastError:    l.LastError(),
+		PaceBps:      l.Pacer.Rate(),
+		ShapeBps:     l.Shaper.ActiveRate(time.Now()),
+		FECGroup:     l.FECGroup(),
+		FECSent:      l.FECSent.Load(),
+		FECRecovered: l.FECRecovered.Load(),
+		Benched:      l.Benched(),
+		Metered:      l.Metered(),
+		Share:        l.MeterShare(),
 	}
 	l.Health(func(h *Health) {
 		v.Label = h.Label
@@ -157,6 +165,9 @@ type EngineView struct {
 	GapsDetected  uint64  `json:"gapsDetected"`
 	GapsRecovered uint64  `json:"gapsRecovered"`
 	GapsGaveUp    uint64  `json:"gapsGaveUp"`
+	FEC           bool    `json:"fec"`
+	FECRecovered  uint64  `json:"fecRecovered"`
+	FECBad        uint64  `json:"fecBad"`
 }
 
 func (e *Engine) View() EngineView {
@@ -179,6 +190,9 @@ func (e *Engine) View() EngineView {
 		Redundancy:    p.Redundancy,
 		ARQ:           e.arq.Load(),
 		Retransmits:   e.Retransmits.Load(),
+		FEC:           e.FEC(),
+		FECRecovered:  e.FECRecovered.Load(),
+		FECBad:        e.FECBad.Load(),
 		RtxPremature:  e.RtxPremature.Load(),
 		Reinjected:    e.Reinjected.Load(),
 		NacksSent:     e.NacksSent.Load(),

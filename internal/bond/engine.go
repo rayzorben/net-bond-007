@@ -64,6 +64,11 @@ type Engine struct {
 	closeOnce            sync.Once
 
 	flows flowTable // per-connection tracking; see flows.go
+
+	// Forward error correction; see fec.go.
+	fecOn                atomic.Bool
+	fecRx                fecStore
+	FECRecovered, FECBad atomic.Uint64
 }
 
 // SetUpstream marks this engine as the client side (what it sends travels
@@ -139,6 +144,7 @@ func (e *Engine) AddLink(id uint8, name, kind string, send func([]byte) error) *
 		old.close()
 	}
 	l := newLink(id, name, kind, int(e.queueCap.Load()), send, &e.pool, int(e.history.Load()))
+	l.session = e.Session
 	e.links[id] = l
 	e.publish()
 	return l
@@ -296,6 +302,7 @@ func (e *Engine) Send(pkt []byte) int {
 		if l.enqueue(f) {
 			l.Tx.Add(len(f))
 			sent++
+			l.fec.add(seq, pkt, now, l.fecOut)
 		} else {
 			l.Drops.Add(1)
 			e.pool.Put(buf)
@@ -332,19 +339,26 @@ func (e *Engine) Receive(l *Link, frame []byte) {
 		return
 	}
 	l.Rx.Add(len(frame))
-	l.LastRx.Store(time.Now().UnixNano())
+	now := time.Now()
+	l.LastRx.Store(now.UnixNano())
+	e.accept(l, seq, payload, now)
+}
+
+// accept runs a received (or FEC-rebuilt) packet through de-duplication and
+// the reorder buffer. It reports whether the packet was new.
+func (e *Engine) accept(l *Link, seq uint64, payload []byte, now time.Time) bool {
 	switch e.win.Check(seq) {
 	case dedup.Duplicate:
 		l.Dups.Add(1)
-		return
+		return false
 	case dedup.TooOld:
 		l.Dups.Add(1)
 		e.TooOld.Add(1)
-		return
+		return false
 	}
 	l.Wins.Add(1)
 	e.UniqueRx.Add(len(payload))
-	now := time.Now()
+	e.fecRx.remember(seq, payload, now.UnixNano(), e.fecOn.Load())
 	if e.arq.Load() {
 		e.gaps.seen(seq, now)
 	}
@@ -361,6 +375,7 @@ func (e *Engine) Receive(l *Link, frame []byte) {
 	}
 	e.reorder.Push(seq, payload, now, e.deliver)
 	e.armTimer()
+	return true
 }
 
 func (e *Engine) armTimer() {
@@ -392,6 +407,12 @@ func (e *Engine) Tick(now time.Time) {
 		l.lastWins = w
 		l.healthMu.Unlock()
 		totalWins += wins[i]
+	}
+	fec := e.fecOn.Load()
+	for _, l := range links {
+		if fec {
+			e.updateFEC(l, now)
+		}
 	}
 	for i, l := range links {
 		l.Health(func(h *Health) {
@@ -542,6 +563,10 @@ func (e *Engine) nackTiming(now time.Time) (wait, retry time.Duration) {
 		hi = max(hi, d)
 	}
 	wait = max(15*time.Millisecond, jit, hi-best+5*time.Millisecond)
+	// Give FEC its chance to rebuild the packet before asking for a repair.
+	if sp := e.fecRx.Span(now); sp > 0 {
+		wait = max(wait, sp+sp/4+2*time.Millisecond)
+	}
 	// Never wait so long that the repair can't arrive within the hold.
 	wait = min(wait, max(25*time.Millisecond, srtt/2))
 	retry = max(50*time.Millisecond, srtt+srtt/2)
@@ -570,6 +595,12 @@ func (e *Engine) nackLoop() {
 		case <-e.closed:
 			return
 		case now := <-t.C:
+			if e.fecOn.Load() {
+				for _, l := range e.Links() {
+					l.fec.flushOld(now, l.fecOut)
+				}
+			}
+			e.retryFEC(now)
 			if !e.arq.Load() {
 				continue
 			}
@@ -629,12 +660,12 @@ func (e *Engine) reinjectQuiet(now time.Time) {
 			to := links[0]
 			buf := e.pool.Get().([]byte)
 			f := proto.AppendData(buf[:0], e.Session, to.ID, seq, pkt)
-			if to.enqueue(f) {
+			if to.enqueueRepair(f) {
 				to.Tx.Add(len(f))
 				if to.Metered() {
 					to.spendMeter(len(f))
 				}
-				e.rtx.resent(seq, now.Add(to.ArrivalDelay(now)).UnixNano(), linkBit(to.ID))
+				e.rtx.resent(seq, now.Add(to.RepairDelay(now)).UnixNano(), linkBit(to.ID))
 				n++
 			} else {
 				e.pool.Put(buf)
@@ -710,6 +741,17 @@ func (e *Engine) HandleNack(frame []byte) {
 			}
 			budget--
 			carriers, tries := e.rtx.carriers(r.Start + i)
+			if tries == 0 && r.Count == 1 {
+				// An isolated loss on every link that carried it sizes FEC.
+				// Bursts (a buffer overflowing) are not counted: one parity
+				// per group can't rebuild them, and they would inflate the
+				// overhead for nothing.
+				for _, l := range all {
+					if carriers&linkBit(l.ID) != 0 {
+						l.lossLost.Add(1)
+					}
+				}
+			}
 			links := repairLinks(cands, all, carriers, tries, len(pkt)+proto.DataHeaderLen, nowN, now)
 			if len(links) == 0 {
 				continue
@@ -718,14 +760,14 @@ func (e *Engine) HandleNack(frame []byte) {
 			for _, l := range links {
 				mask |= linkBit(l.ID)
 			}
-			e.rtx.resent(r.Start+i, now.Add(links[0].ArrivalDelay(now)).UnixNano(), mask)
+			e.rtx.resent(r.Start+i, now.Add(links[0].RepairDelay(now)).UnixNano(), mask)
 			for _, l := range links {
 				if l.Metered() {
 					l.spendMeter(len(pkt) + proto.DataHeaderLen)
 				}
 				buf := e.pool.Get().([]byte)
 				f := proto.AppendData(buf[:0], e.Session, l.ID, r.Start+i, pkt)
-				if l.enqueue(f) {
+				if l.enqueueRepair(f) {
 					l.Tx.Add(len(f))
 				} else {
 					e.pool.Put(buf)

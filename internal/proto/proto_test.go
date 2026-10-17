@@ -116,3 +116,46 @@ func TestNackRoundTrip(t *testing.T) {
 		t.Fatalf("ranges not capped: %d", len(r))
 	}
 }
+
+func TestFECRoundTrip(t *testing.T) {
+	seqs := []uint64{1000, 1002, 1005, 1000 + 65535}
+	parity := []byte{1, 2, 3, 4, 5}
+	f := AppendFEC(nil, 7, 3, seqs, 0xabcd, parity)
+	h, err := ParseHeader(f)
+	if err != nil || h.Type != TypeFEC || h.Session != 7 || h.Link != 3 {
+		t.Fatalf("header %+v %v", h, err)
+	}
+	got, err := ParseFEC(f, nil)
+	if err != nil || got.LenXor != 0xabcd || string(got.Parity) != string(parity) || len(got.Seqs) != len(seqs) {
+		t.Fatalf("got %+v %v", got, err)
+	}
+	for i := range seqs {
+		if got.Seqs[i] != seqs[i] {
+			t.Fatalf("seq %d: %d want %d", i, got.Seqs[i], seqs[i])
+		}
+	}
+	if _, err := ParseFEC(f[:HeaderLen+5], nil); err == nil {
+		t.Fatal("short FEC frame parsed")
+	}
+}
+
+// PROBE / PROBE_ACK gained a trailing FEC counter: frames from older peers
+// (without it) still parse, and older parsers only check the minimum length.
+func TestProbeFECCounterIsBackwardCompatible(t *testing.T) {
+	p := Probe{Seq: 3, RxKbps: 9, FECRecovered: 42}
+	f := AppendProbe(nil, 1, 2, p)
+	if got, err := ParseProbe(f); err != nil || got.FECRecovered != 42 || got.RxKbps != 9 {
+		t.Fatalf("got %+v %v", got, err)
+	}
+	old := f[:HeaderLen+ProbeBodyLen]
+	if got, err := ParseProbe(old); err != nil || got.FECRecovered != 0 || got.RxKbps != 9 {
+		t.Fatalf("old-format probe: %+v %v", got, err)
+	}
+	a := AppendProbeAck(nil, 1, 2, ProbeAck{Seq: 4, RxBytes: 5, FECRecovered: 6})
+	if got, err := ParseProbeAck(a); err != nil || got.FECRecovered != 6 || got.RxBytes != 5 {
+		t.Fatalf("ack %+v %v", got, err)
+	}
+	if got, err := ParseProbeAck(a[:HeaderLen+ProbeAckLen]); err != nil || got.FECRecovered != 0 {
+		t.Fatalf("old-format ack %+v %v", got, err)
+	}
+}

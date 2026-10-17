@@ -108,3 +108,20 @@ func BenchmarkCheck(b *testing.B) {
 		w.Check(uint64(i + 1))
 	}
 }
+
+func TestSeenDoesNotMark(t *testing.T) {
+	var w Window
+	if w.Seen(5) {
+		t.Fatal("unseen reported seen")
+	}
+	if w.Check(5) != Fresh || !w.Seen(5) || w.Seen(4) {
+		t.Fatal("Seen after Check")
+	}
+	if w.Check(4) != Fresh {
+		t.Fatal("Seen marked a sequence number")
+	}
+	w.Check(5 + WindowBits + 1)
+	if !w.Seen(1) {
+		t.Fatal("too-old seq should count as seen")
+	}
+}

@@ -56,6 +56,7 @@ func (c *collector) snapshot() []uint32 {
 func fakePkt(id uint32) []byte {
 	p := make([]byte, 1200)
 	p[0] = 0x45
+	binary.BigEndian.PutUint16(p[2:], uint16(len(p)))
 	p[9] = 6
 	binary.BigEndian.PutUint32(p[20:], id) // lands in TCP src/dst port bytes
 	p[20+13] = 0x10                        // ACK only: not priority
@@ -420,6 +421,8 @@ func duplex(t *testing.T, delay time.Duration, loss float64) (a, b *Engine, got 
 					dst.Receive(dstLink(), c)
 				case proto.TypeNack:
 					dst.HandleNack(c)
+				case proto.TypeFEC:
+					dst.ReceiveFEC(dstLink(), c)
 				}
 			})
 			return nil

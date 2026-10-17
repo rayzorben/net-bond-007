@@ -35,6 +35,10 @@ const (
 	DataHeaderLen = HeaderLen + 8
 	ProbeBodyLen  = 4 + 8 + 4 + 4 + 2 + 4 + 2 + 1 + 4 + 4
 	ProbeAckLen   = 4 + 8 + 8 + 8
+	// probeFECLen is the optional trailing FEC counter on PROBE and
+	// PROBE_ACK. Older peers stop reading before it, and frames from them
+	// lack it (it reads as 0).
+	probeFECLen = 4
 	// MaxFrame bounds a datagram: an IP packet up to 64KiB-1 plus headers.
 	MaxFrame = 65535 + DataHeaderLen
 )
@@ -82,6 +86,8 @@ func (t Type) String() string {
 		return "RELAY_HELLO"
 	case TypeRelayAck:
 		return "RELAY_ACK"
+	case TypeFEC:
+		return "FEC"
 	}
 	return "UNKNOWN"
 }
@@ -166,6 +172,9 @@ type Probe struct {
 	State       uint8  // link state in the low bits, ProbeBackupBit if backup
 	LastRTTMicr uint32 // most recent raw RTT sample (fast congestion signal)
 	RxKbps      uint32 // rate the client received on this link in the last interval
+	// FECRecovered counts packets the client rebuilt from FEC on this link
+	// (cumulative), so the server can size its FEC by the real loss rate.
+	FECRecovered uint32
 }
 
 const (
@@ -174,7 +183,7 @@ const (
 )
 
 func AppendProbe(dst []byte, session uint32, link uint8, p Probe) []byte {
-	dst = append(dst[:0], make([]byte, HeaderLen+ProbeBodyLen)...)
+	dst = append(dst[:0], make([]byte, HeaderLen+ProbeBodyLen+probeFECLen)...)
 	PutHeader(dst, Header{Type: TypeProbe, Session: session, Link: link})
 	b := dst[HeaderLen:]
 	binary.BigEndian.PutUint32(b[0:], p.Seq)
@@ -187,6 +196,7 @@ func AppendProbe(dst []byte, session uint32, link uint8, p Probe) []byte {
 	b[28] = p.State
 	binary.BigEndian.PutUint32(b[29:], p.LastRTTMicr)
 	binary.BigEndian.PutUint32(b[33:], p.RxKbps)
+	binary.BigEndian.PutUint32(b[37:], p.FECRecovered)
 	return dst
 }
 
@@ -195,17 +205,22 @@ func ParseProbe(b []byte) (Probe, error) {
 		return Probe{}, ErrShort
 	}
 	b = b[HeaderLen:]
+	var fec uint32
+	if len(b) >= ProbeBodyLen+probeFECLen {
+		fec = binary.BigEndian.Uint32(b[ProbeBodyLen:])
+	}
 	return Probe{
-		Seq:         binary.BigEndian.Uint32(b[0:]),
-		SentAt:      int64(binary.BigEndian.Uint64(b[4:])),
-		RTTMicros:   binary.BigEndian.Uint32(b[12:]),
-		JitterMicro: binary.BigEndian.Uint32(b[16:]),
-		LossPermil:  binary.BigEndian.Uint16(b[20:]),
-		CapKbps:     binary.BigEndian.Uint32(b[22:]),
-		Weight:      binary.BigEndian.Uint16(b[26:]),
-		State:       b[28],
-		LastRTTMicr: binary.BigEndian.Uint32(b[29:]),
-		RxKbps:      binary.BigEndian.Uint32(b[33:]),
+		FECRecovered: fec,
+		Seq:          binary.BigEndian.Uint32(b[0:]),
+		SentAt:       int64(binary.BigEndian.Uint64(b[4:])),
+		RTTMicros:    binary.BigEndian.Uint32(b[12:]),
+		JitterMicro:  binary.BigEndian.Uint32(b[16:]),
+		LossPermil:   binary.BigEndian.Uint16(b[20:]),
+		CapKbps:      binary.BigEndian.Uint32(b[22:]),
+		Weight:       binary.BigEndian.Uint16(b[26:]),
+		State:        b[28],
+		LastRTTMicr:  binary.BigEndian.Uint32(b[29:]),
+		RxKbps:       binary.BigEndian.Uint32(b[33:]),
 	}, nil
 }
 
@@ -216,16 +231,19 @@ type ProbeAck struct {
 	SentAt    int64
 	RxPackets uint64
 	RxBytes   uint64
+	// FECRecovered counts packets the server rebuilt from FEC on this link.
+	FECRecovered uint32
 }
 
 func AppendProbeAck(dst []byte, session uint32, link uint8, a ProbeAck) []byte {
-	dst = append(dst[:0], make([]byte, HeaderLen+ProbeAckLen)...)
+	dst = append(dst[:0], make([]byte, HeaderLen+ProbeAckLen+probeFECLen)...)
 	PutHeader(dst, Header{Type: TypeProbeAck, Session: session, Link: link})
 	b := dst[HeaderLen:]
 	binary.BigEndian.PutUint32(b[0:], a.Seq)
 	binary.BigEndian.PutUint64(b[4:], uint64(a.SentAt))
 	binary.BigEndian.PutUint64(b[12:], a.RxPackets)
 	binary.BigEndian.PutUint64(b[20:], a.RxBytes)
+	binary.BigEndian.PutUint32(b[28:], a.FECRecovered)
 	return dst
 }
 
@@ -234,11 +252,16 @@ func ParseProbeAck(b []byte) (ProbeAck, error) {
 		return ProbeAck{}, ErrShort
 	}
 	b = b[HeaderLen:]
+	var fec uint32
+	if len(b) >= ProbeAckLen+probeFECLen {
+		fec = binary.BigEndian.Uint32(b[ProbeAckLen:])
+	}
 	return ProbeAck{
-		Seq:       binary.BigEndian.Uint32(b[0:]),
-		SentAt:    int64(binary.BigEndian.Uint64(b[4:])),
-		RxPackets: binary.BigEndian.Uint64(b[12:]),
-		RxBytes:   binary.BigEndian.Uint64(b[20:]),
+		FECRecovered: fec,
+		Seq:          binary.BigEndian.Uint32(b[0:]),
+		SentAt:       int64(binary.BigEndian.Uint64(b[4:])),
+		RxPackets:    binary.BigEndian.Uint64(b[12:]),
+		RxBytes:      binary.BigEndian.Uint64(b[20:]),
 	}, nil
 }
 
@@ -251,6 +274,9 @@ type Hello struct {
 	OS         string `json:"os"`
 	LinkName   string `json:"link"`
 	LinkKind   string `json:"kind"`
+	// FEC: this client understands FEC frames (sent downstream when its
+	// policy asks for them).
+	FEC bool `json:"fec,omitempty"`
 }
 
 // HelloAck assigns the client its tunnel address.
@@ -266,6 +292,8 @@ type HelloAck struct {
 	// server restarted and rebuilt the session) the client resets its
 	// receive window because the server's sequence numbers restart at 1.
 	Epoch int64 `json:"epoch"`
+	// FEC: the server understands FEC frames, so the client may send them.
+	FEC bool `json:"fec,omitempty"`
 }
 
 // Policy tells the server how to schedule downstream traffic for a session.
@@ -285,6 +313,9 @@ type Policy struct {
 	PacingLossPct          int    `json:"pacingLossPct"`
 	Retransmit             bool   `json:"retransmit"`
 	Shaping                bool   `json:"shaping"`
+	// FEC asks the server to protect downstream links with FEC frames
+	// (sized automatically from measured loss).
+	FEC bool `json:"fec,omitempty"`
 	// Automatic scaling decided by the client: copies per packet and which
 	// links to stop using. Zero/empty = not active.
 	AutoCopies int     `json:"autoCopies,omitempty"`
@@ -390,4 +421,65 @@ func ParseNack(f []byte) ([]SeqRange, error) {
 		out[i] = SeqRange{Start: binary.BigEndian.Uint64(b[o:]), Count: binary.BigEndian.Uint16(b[o+8:])}
 	}
 	return out, nil
+}
+
+// FEC (forward error correction) frames carry the XOR of a group of DATA
+// payloads that were sent on one link, so the receiver can rebuild any single
+// missing packet of the group without waiting a round trip for a NACK repair.
+//
+// Body: count n (1 byte) | XOR of the payload lengths (2) | first seq (8) |
+// (n-1) x uint16 offsets of the other seqs from the first | parity bytes
+// (the XOR of the payloads, each zero-padded to the longest).
+const TypeFEC Type = 12
+
+// MaxFECGroup bounds the packets one FEC frame protects.
+const MaxFECGroup = 64
+
+// FEC is a decoded FEC frame. Parity aliases the frame buffer.
+type FEC struct {
+	Seqs   []uint64
+	LenXor uint16
+	Parity []byte
+}
+
+// AppendFEC builds a FEC frame into dst (which is reset). seqs must be
+// ascending, at most MaxFECGroup long, and within 65535 of seqs[0].
+func AppendFEC(dst []byte, session uint32, link uint8, seqs []uint64, lenXor uint16, parity []byte) []byte {
+	n := HeaderLen + 1 + 2 + 8 + 2*(len(seqs)-1) + len(parity)
+	if cap(dst) < n {
+		dst = make([]byte, n)
+	}
+	dst = dst[:n]
+	PutHeader(dst, Header{Type: TypeFEC, Session: session, Link: link})
+	b := dst[HeaderLen:]
+	b[0] = byte(len(seqs))
+	binary.BigEndian.PutUint16(b[1:], lenXor)
+	binary.BigEndian.PutUint64(b[3:], seqs[0])
+	o := 11
+	for _, s := range seqs[1:] {
+		binary.BigEndian.PutUint16(b[o:], uint16(s-seqs[0]))
+		o += 2
+	}
+	copy(b[o:], parity)
+	return dst
+}
+
+// ParseFEC decodes a FEC frame. seqs is reused for the result if large enough.
+func ParseFEC(f []byte, seqs []uint64) (FEC, error) {
+	if len(f) < HeaderLen+11 {
+		return FEC{}, ErrShort
+	}
+	b := f[HeaderLen:]
+	n := int(b[0])
+	if n < 2 || n > MaxFECGroup || len(b) < 11+2*(n-1)+1 {
+		return FEC{}, ErrShort
+	}
+	base := binary.BigEndian.Uint64(b[3:])
+	seqs = append(seqs[:0], base)
+	o := 11
+	for i := 1; i < n; i++ {
+		seqs = append(seqs, base+uint64(binary.BigEndian.Uint16(b[o:])))
+		o += 2
+	}
+	return FEC{Seqs: seqs, LenXor: binary.BigEndian.Uint16(b[1:]), Parity: b[o:]}, nil
 }

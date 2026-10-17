@@ -4,7 +4,7 @@
 
 | Package | Role |
 |---|---|
-| `internal/proto` | Wire format. A common 8-byte header, DATA frames (+8-byte sequence number + raw IP packet), binary PROBE/PROBE_ACK, and JSON control frames (HELLO, HELLO_ACK, POLICY, REJECT, BYE). |
+| `internal/proto` | Wire format. A common 8-byte header, DATA frames (+8-byte sequence number + raw IP packet), binary PROBE/PROBE_ACK, NACK and FEC (parity) frames, and JSON control frames (HELLO, HELLO_ACK, POLICY, REJECT, BYE). |
 | `internal/dedup` | First-copy-wins filter: a 16 384-packet sliding bitmap window (IPsec/WireGuard style), O(1) per packet. |
 | `internal/sched` | Decides how many copies each packet gets (`Copies`) and which links carry them (`PickFastest` / weighted `Pick`). |
 | `internal/reorder` | Holds early packets until the gap fills or the hold time expires. It is a pure data structure driven by the caller's clock. |
@@ -45,6 +45,15 @@ Each link therefore has an AIMD pacer:
 
 The learned rate is also the link's capacity estimate for weights and the dashboard.
 
+## Loss recovery: ARQ and FEC
+
+The inner TCP connections from the server's userspace stack (gVisor, CUBIC) cross the bond, so any loss they see costs them their window. Two mechanisms hide loss from them:
+
+- **ARQ** (`bonding.retransmit`): the receiver spots a hole in the bond's sequence numbers, NACKs it, and the reorder buffer holds the packets behind it until the repair arrives. Repairs go out on a priority lane ahead of queued data; behind a deep queue they used to land after the hold had already given up.
+- **FEC** (`bonding.fec`, on by default): ARQ costs at least one round trip per loss, and the reorder buffer holds in-order delivery for that long. On a link with steady random loss (Starlink), holes open many times a second. In-order delivery is then held most of the time, so the inner TCP's round trip stretches 2–3x and a window sized for the real RTT runs at half speed. So for every group of *k* packets sent on a link, the sender also sends their XOR. The receiver rebuilds a single missing packet as soon as the parity arrives (about 5 ms in the lab instead of 100–290 ms). Groups are interleaved two ways so a short burst lands in different groups. A parity that overtakes its group is kept for up to 100 ms and retried.
+  - Sizing is per link and automatic. It counts isolated losses only: NACKed single packets, plus the peer's FEC rebuilds, which come back in a trailing PROBE/PROBE_ACK field so FEC doesn't switch itself off by hiding the loss. FEC turns on at 0.05% loss with *k* = 0.08/loss, clamped to 8..32 (about 3% overhead at 0.2% loss, 12.5% at 1% or more). It turns off after 30 s below 0.02%. Clean links carry no parity. Bursts (a buffer overflowing) are not counted: one parity can't rebuild them.
+  - Compatibility: HELLO/HELLO_ACK carry `fec`, and the client asks for downstream FEC in POLICY. Peers that don't advertise it never receive FEC frames, and older peers ignore unknown frame types anyway.
+
 ## Health and failover
 
 - Probes go out every 250 ms per link: RTT, jitter (RTTVAR) and loss over the last 40 probes. The client reports its view to the server in every probe, including the latest raw RTT and per-interval delivered rate.
@@ -71,3 +80,15 @@ Links: eth 26 ms / 120 Mbit; Wi-Fi 46 ms / 80 Mbit / 0.5% loss each way; USB 100
 | Wi-Fi alone | ~3.4 Mbit/s. That's the Mathis limit for TCP at ~1% loss; it's not a Net-Bond-007 bottleneck. |
 | Wi-Fi + USB mirrored | ~13 Mbit/s, about 4× the single lossy link, because redundancy hides random loss. |
 | Ethernet pulled mid-transfer | completes intact; the remaining lossy links then limit TCP as above. |
+
+### Single lossy link (PROFILE=starlink, eth1 only: 40 Mbit, 76 ms RTT)
+
+Direct uses a BBR sender, the way a CDN would. Medians of 5 runs of 50 MB.
+
+| Link condition | Direct | Bonded before FEC | Bonded with FEC + repair priority |
+|---|---|---|---|
+| Clean | 35.6 | 35.4 | — |
+| 0.2% random loss | 36 | 15–19 | 33.2 |
+| 0.2% loss + 150-packet buffer + 6 ms jitter | 35.6 | ~14–20 | 23.4 |
+
+On a clean link the bond adds nothing measurable. Random loss was the main bottleneck, and FEC removes it. A shallow buffer is still a limit: bursts overflow it, and probing for capacity overruns it. That is the shaper's job and remains open.

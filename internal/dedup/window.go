@@ -54,6 +54,20 @@ func (w *Window) Check(seq uint64) Result {
 	return Fresh
 }
 
+// Seen reports whether seq was already accepted (or fell behind the window),
+// without marking it.
+func (w *Window) Seen(seq uint64) bool {
+	if seq == 0 {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if seq > w.top {
+		return false
+	}
+	return w.top-seq >= WindowBits || w.isSet(seq)
+}
+
 // Reset forgets all history (used when a session restarts).
 func (w *Window) Reset() {
 	w.mu.Lock()

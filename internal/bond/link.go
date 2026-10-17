@@ -47,9 +47,12 @@ type Link struct {
 	meterBank  float64 // bytes this link may still carry
 
 	queue chan []byte
-	done  chan struct{}
-	send  func([]byte) error
-	pool  *sync.Pool
+	// prio carries repairs ahead of queued data: a repair stuck behind a
+	// deep queue arrives after the receiver's reorder hold gave up on it.
+	prio chan []byte
+	done chan struct{}
+	send func([]byte) error
+	pool *sync.Pool
 
 	Tx, Rx           metrics.Counter
 	Wins, Dups       atomic.Uint64
@@ -66,6 +69,19 @@ type Link struct {
 	Pacer Pacer
 	// Shaper smooths bursts to the delivery rate; see shaper.go.
 	Shaper Shaper
+
+	// FEC; see fec.go.
+	session      uint32
+	fec          fecEncoder
+	fecOut       func(seqs []uint64, lenXor uint16, parity []byte)
+	FECSent      atomic.Uint64 // parity frames sent
+	FECRecovered atomic.Uint64 // packets rebuilt from this link's parity
+	peerFEC      atomic.Uint64 // the peer's FECRecovered for this link
+	lossLost     atomic.Uint64 // packets the peer NACKed that went only on this link
+	// FEC sizing state, guarded by healthMu.
+	fecLastTx, fecLastLost uint64
+	fecLoss                float64
+	fecQuiet               time.Time
 
 	owd    atomic.Int64 // estimated one-way delay, nanoseconds
 	rxBusy atomic.Bool  // carried real traffic in the last tick
@@ -172,34 +188,63 @@ func newLink(id uint8, name, kind string, queueCap int, send func([]byte) error,
 	l := &Link{
 		ID: id, Name: name, Kind: kind,
 		queue:    make(chan []byte, queueCap),
+		prio:     make(chan []byte, prioCap),
 		done:     make(chan struct{}),
 		send:     send,
 		pool:     pool,
 		queueCap: queueCap,
 	}
 	l.health.History = metrics.NewHistory(history)
+	l.fecOut = l.emitFEC
 	l.SetWeight(0)
 	go l.writer()
 	return l
 }
 
+const prioCap = 256
+
 func (l *Link) writer() {
 	for {
+		var f []byte
 		select {
-		case <-l.done:
-			return
-		case f := <-l.queue:
-			if d := l.Shaper.Delay(len(f), time.Now()); d > 0 {
-				time.Sleep(d)
+		case f = <-l.prio:
+		default:
+			select {
+			case <-l.done:
+				return
+			case f = <-l.prio:
+			case f = <-l.queue:
 			}
-			if err := l.send(f); err != nil {
-				l.Errors.Add(1)
-				s := err.Error()
-				l.lastErr.Store(&s)
-			}
-			l.pool.Put(f[:cap(f)])
 		}
+		if d := l.Shaper.Delay(len(f), time.Now()); d > 0 {
+			time.Sleep(d)
+		}
+		if err := l.send(f); err != nil {
+			l.Errors.Add(1)
+			s := err.Error()
+			l.lastErr.Store(&s)
+		}
+		l.pool.Put(f[:cap(f)])
 	}
+}
+
+// enqueueRepair queues a repair ahead of ordinary data (falling back to the
+// data queue when the priority lane is full).
+func (l *Link) enqueueRepair(f []byte) bool {
+	select {
+	case l.prio <- f:
+		return true
+	default:
+		return l.enqueue(f)
+	}
+}
+
+// RepairDelay estimates when a repair queued now would arrive.
+func (l *Link) RepairDelay(now time.Time) time.Duration {
+	if len(l.prio) >= prioCap {
+		return l.ArrivalDelay(now)
+	}
+	return time.Duration(l.owd.Load()) + time.Duration(len(l.prio))*300*time.Microsecond
 }
 
 // enqueue hands a frame to the writer; returns false if the queue is full.

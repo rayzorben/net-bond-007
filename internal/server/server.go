@@ -333,6 +333,7 @@ func (s *Server) handle(f []byte, from pkt) {
 		ack := proto.AppendProbeAck(nil, ss.ID, l.ID, proto.ProbeAck{
 			Seq: p.Seq, SentAt: p.SentAt,
 			RxPackets: l.Rx.Packets.Load(), RxBytes: l.Rx.Bytes.Load(),
+			FECRecovered: uint32(l.FECRecovered.Load()),
 		})
 		l.SendRaw(ack)
 	case proto.TypePolicy:
@@ -350,6 +351,8 @@ func (s *Server) handle(f []byte, from pkt) {
 	case proto.TypeNack:
 		l.Rx.Add(len(f))
 		ss.Engine.HandleNack(f)
+	case proto.TypeFEC:
+		ss.Engine.ReceiveFEC(l, f)
 	case proto.TypeBye:
 		ss.Engine.RemoveLink(l.ID)
 		ss.paths.Delete(l.ID)
@@ -429,6 +432,7 @@ func (s *Server) hello(f []byte, h proto.Header, from pkt) {
 		ServerName: cfg.Name,
 		Version:    Version,
 		Epoch:      ss.Created.UnixNano(),
+		FEC:        true,
 	})
 	l.SendRaw(ack)
 	s.applyPolicy(ss)
@@ -513,6 +517,7 @@ func (s *Server) applyProbe(l *bond.Link, p proto.Probe) {
 	}
 	l.Pacer.Govern(time.Now(), recent, minRTT, loss, float64(p.RxKbps)*1000)
 	l.Shaper.Observe(time.Now(), float64(p.RxKbps)*1000)
+	l.SetPeerFECRecovered(p.FECRecovered)
 	l.SetOneWayDelay(srtt / 2)
 }
 
@@ -535,6 +540,7 @@ func (s *Server) applyPolicy(ss *Session) {
 		l.Shaper.Configure(p.Shaping)
 	}
 	ss.Engine.SetARQ(p.Retransmit)
+	ss.Engine.SetFEC(p.FEC) // only FEC-capable clients ask for it
 	red := max(p.Redundancy, 1)
 	if p.AutoCopies > 0 && mode == sched.ModeSmart {
 		// The client's automatic scaling decided the copies.
@@ -806,6 +812,11 @@ func (b Backend) Routes(mux *http.ServeMux) {
 			out = append(out, sv)
 		}
 		webui.WriteJSON(w, http.StatusOK, map[string]any{"sessions": out})
+	})
+	// Inner TCP sender state (cwnd, RTT, RTO) per live connection, for
+	// diagnosing slow downloads through the bond.
+	mux.HandleFunc("GET /api/x/tcpinfo", func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteJSON(w, http.StatusOK, map[string]any{"connections": append([]string{}, b.S.gw.TCPInfo()...), "stats": b.S.gw.TCPStats()})
 	})
 	mux.HandleFunc("POST /api/x/sessions/{id}/kick", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
