@@ -54,15 +54,16 @@ type Engine struct {
 	history            atomic.Int64
 
 	// In-tunnel retransmission; see arq.go.
-	arq                  atomic.Bool
-	rtx                  rtxBuffer
-	gaps                 gapTracker
-	Retransmits          atomic.Uint64
-	RtxPremature         atomic.Uint64 // NACKed packets still in flight: not repaired
-	Reinjected           atomic.Uint64 // resent at once because their link went quiet
-	NacksSent, NacksRecv atomic.Uint64
-	closed               chan struct{}
-	closeOnce            sync.Once
+	arq                    atomic.Bool
+	rtx                    rtxBuffer
+	gaps                   gapTracker
+	Retransmits            atomic.Uint64
+	RtxPremature           atomic.Uint64 // NACKed packets still in flight: not repaired
+	Reinjected             atomic.Uint64 // resent at once because their link went quiet
+	NacksSent, NacksRecv   atomic.Uint64
+	QuietsSent, QuietsRecv atomic.Uint64 // see quiet.go
+	closed                 chan struct{}
+	closeOnce              sync.Once
 
 	flows flowTable // per-connection tracking; see flows.go
 
@@ -317,10 +318,20 @@ func (e *Engine) Send(pkt []byte) int {
 // idle). This must not depend on whether anything arrived in the last few
 // milliseconds: after a stall, a dead link would look like the fastest.
 func penalty(links []*Link, l *Link, nowN int64) time.Duration {
+	if l.PeerQuiet(nowN) {
+		return quietMaxFor // the peer hears nothing on it right now
+	}
 	if !l.QuietVs(links, nowN) {
 		return 0
 	}
 	return l.SilencePenalty(nowN)
+}
+
+func peerQuietPenalty(l *Link, nowN int64) time.Duration {
+	if l.PeerQuiet(nowN) {
+		return quietMaxFor
+	}
+	return 0
 }
 
 func linkByID(links []*Link, id uint8) *Link {
@@ -514,8 +525,8 @@ func (e *Engine) fastest(n int, now time.Time, withMetered bool) []*Link {
 		ls = benched
 	}
 	sort.Slice(ls, func(i, j int) bool {
-		di := ls[i].ArrivalDelay(now) + ls[i].SilencePenalty(nowN)
-		dj := ls[j].ArrivalDelay(now) + ls[j].SilencePenalty(nowN)
+		di := ls[i].ArrivalDelay(now) + ls[i].SilencePenalty(nowN) + peerQuietPenalty(ls[i], nowN)
+		dj := ls[j].ArrivalDelay(now) + ls[j].SilencePenalty(nowN) + peerQuietPenalty(ls[j], nowN)
 		if ls[i].State() == StateDegraded {
 			di = di*4 + 20*time.Millisecond
 		}
@@ -605,6 +616,7 @@ func (e *Engine) nackLoop() {
 			if !e.arq.Load() {
 				continue
 			}
+			e.watchSilence(now)
 			e.reinjectQuiet(now)
 			if e.gaps.pendingCount() == 0 {
 				continue
@@ -640,40 +652,47 @@ func (e *Engine) reinjectQuiet(now time.Time) {
 		if !q || was || l.LastRx.Load() == 0 {
 			continue
 		}
-		since := l.LastRx.Load() - l.owd.Load()
-		seqs := e.rtx.onlyOn(linkBit(l.ID), since)
-		if len(seqs) == 0 {
+		e.reinjectFrom(l, l.LastRx.Load()-l.owd.Load(), now)
+	}
+}
+
+// reinjectFrom resends on other links everything that went only on l and
+// was due to arrive at or after since (unix nanos).
+func (e *Engine) reinjectFrom(l *Link, since int64, now time.Time) {
+	nowN := now.UnixNano()
+	all := e.Links()
+	seqs := e.rtx.onlyOn(linkBit(l.ID), since)
+	if len(seqs) == 0 {
+		return
+	}
+	cands := e.fastest(4, now, true)
+	n := 0
+	for _, seq := range seqs {
+		pkt, ok := e.rtx.get(seq)
+		if !ok {
 			continue
 		}
-		cands := e.fastest(4, now, true)
-		n := 0
-		for _, seq := range seqs {
-			pkt, ok := e.rtx.get(seq)
-			if !ok {
-				continue
-			}
-			carriers, _ := e.rtx.carriers(seq)
-			// tries=1: the link is gone, so metered links may carry these.
-			links := repairLinks(cands, all, carriers, 1, len(pkt)+proto.DataHeaderLen, nowN, now)
-			if len(links) == 0 || links[0] == l {
-				continue
-			}
-			to := links[0]
-			buf := e.pool.Get().([]byte)
-			f := proto.AppendData(buf[:0], e.Session, to.ID, seq, pkt)
-			if to.enqueueRepair(f) {
-				to.Tx.Add(len(f))
-				if to.Metered() {
-					to.spendMeter(len(f))
-				}
-				e.rtx.resent(seq, now.Add(to.RepairDelay(now)).UnixNano(), linkBit(to.ID))
-				n++
-			} else {
-				e.pool.Put(buf)
-			}
+		carriers, _ := e.rtx.carriers(seq)
+		// tries=1: the link is gone, so metered links may carry these.
+		links := repairLinks(cands, all, carriers, 1, len(pkt)+proto.DataHeaderLen, nowN, now)
+		if len(links) == 0 || links[0] == l {
+			continue
 		}
-		e.Reinjected.Add(uint64(n))
+		to := links[0]
+		buf := e.pool.Get().([]byte)
+		f := proto.AppendData(buf[:0], e.Session, to.ID, seq, pkt)
+		if to.enqueueRepair(f) {
+			to.Tx.Add(len(f))
+			if to.Metered() {
+				to.spendMeter(len(f))
+			}
+			e.rtx.resent(seq, now.Add(to.RepairDelay(now)).UnixNano(), linkBit(to.ID))
+			n++
+		} else {
+			e.pool.Put(buf)
+		}
 	}
+	e.Reinjected.Add(uint64(n))
 }
 
 // repairLinks picks up to two links for a repair. A copy was lost on the

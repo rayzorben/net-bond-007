@@ -80,6 +80,10 @@ type Link struct {
 	lossLost     atomic.Uint64 // packets the peer NACKed that went only on this link
 	// Recent losses on this link (sender side), to spot a loss storm.
 	storm stormMeter
+	// Receive-side silence watch (nackLoop only); see quiet.go.
+	rxw rxWatch
+	// The peer reported this link silent until then (unix nanos).
+	peerQuiet atomic.Int64
 	// FEC sizing state, guarded by healthMu.
 	fecLastTx, fecLastLost uint64
 	fecLoss                float64

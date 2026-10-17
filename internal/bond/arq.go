@@ -154,6 +154,13 @@ func (m *stormMeter) loss(nowN int64) {
 	}
 }
 
+// mark flags a storm now (the peer reported the link silent).
+func (m *stormMeter) mark(nowN int64) {
+	m.mu.Lock()
+	m.until = max(m.until, nowN+int64(stormHold))
+	m.mu.Unlock()
+}
+
 func (m *stormMeter) active(nowN int64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

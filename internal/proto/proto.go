@@ -88,6 +88,8 @@ func (t Type) String() string {
 		return "RELAY_ACK"
 	case TypeFEC:
 		return "FEC"
+	case TypeQuiet:
+		return "QUIET"
 	}
 	return "UNKNOWN"
 }
@@ -482,4 +484,29 @@ func ParseFEC(f []byte, seqs []uint64) (FEC, error) {
 		o += 2
 	}
 	return FEC{Seqs: seqs, LenXor: binary.BigEndian.Uint16(b[1:]), Parity: b[o:]}, nil
+}
+
+// TypeQuiet tells the peer that one of its links went silent at the
+// receiver while that link had been busy: the sender should resend at once,
+// on its other links, what it sent only on the silent one. Without it the
+// receiver can't NACK the lost packets until traffic resumes (a Starlink
+// outage is 20-200 ms), and the sender's own silence detection waits for the
+// link's upstream to go quiet, which a download barely uses.
+//
+// Body: silent link id (1) | silent for, ms (2).
+const TypeQuiet Type = 13
+
+func AppendQuiet(dst []byte, session uint32, via, silent uint8, silentFor uint16) []byte {
+	dst = append(dst[:0], make([]byte, HeaderLen+3)...)
+	PutHeader(dst, Header{Type: TypeQuiet, Session: session, Link: via})
+	dst[HeaderLen] = silent
+	binary.BigEndian.PutUint16(dst[HeaderLen+1:], silentFor)
+	return dst
+}
+
+func ParseQuiet(f []byte) (silent uint8, silentForMs uint16, err error) {
+	if len(f) < HeaderLen+3 {
+		return 0, 0, ErrShort
+	}
+	return f[HeaderLen], binary.BigEndian.Uint16(f[HeaderLen+1:]), nil
 }

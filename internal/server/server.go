@@ -353,6 +353,8 @@ func (s *Server) handle(f []byte, from pkt) {
 		ss.Engine.HandleNack(f)
 	case proto.TypeFEC:
 		ss.Engine.ReceiveFEC(l, f)
+	case proto.TypeQuiet:
+		ss.Engine.HandleQuiet(l, f)
 	case proto.TypeBye:
 		ss.Engine.RemoveLink(l.ID)
 		ss.paths.Delete(l.ID)

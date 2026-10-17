@@ -127,6 +127,8 @@ func (l *clink) reader() {
 			l.e.HandleNack(f)
 		case proto.TypeFEC:
 			l.e.ReceiveFEC(l.link, f)
+		case proto.TypeQuiet:
+			l.e.HandleQuiet(l.link, f)
 		case proto.TypeProbeAck:
 			a, err := proto.ParseProbeAck(f)
 			if err != nil {
