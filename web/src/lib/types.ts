@@ -41,12 +41,12 @@ export interface IfaceView {
 export interface ClientState {
   role: 'client'; name: string; uptime: number
   server: { address: string; resolved?: string; name?: string; version?: string; connected: boolean; enabled: boolean; error?: string }
-  tunnel: { up: boolean; name?: string; ip?: string; gateway?: string; mtu?: number; routes: number; dns?: string; error?: string }
+  tunnel: { up: boolean; name?: string; ip?: string; gateway?: string; mtu?: number; routes: number; dns?: string; error?: string; bypass?: string }
   engine: EngineView
   links: LinkView[]
   interfaces: IfaceView[]
   warnings: string[]
-  auto?: { mode: string; copies: number; direct: boolean; directVia?: string; benched?: string[] }
+  auto?: { mode: string; copies: number; direct: boolean; directVia?: string; benched?: string[]; guard?: { active: boolean; via?: string; bondedMbps?: number; directMbps?: number; testedAt?: number; nextAt?: number; error?: string } }
 }
 
 export interface SessionView {

@@ -182,3 +182,41 @@ func TestMigrateRenamedTunnel(t *testing.T) {
 		t.Fatal("custom tunnel name overwritten")
 	}
 }
+
+func TestFailOpenOnForOldFilesAndKeptWhenOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(path, []byte(`{"configVersion":3,"tunnel":{"failOpen":false,"failOpenSec":0}}`), 0o600)
+	st, err := Load(path, DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := st.Get(); !c.Tunnel.FailOpen || c.Tunnel.FailOpenSec != 8 {
+		t.Fatalf("v3 file not migrated: %+v", c.Tunnel)
+	}
+	if err := st.Mutate(func(c *Client) { c.Tunnel.FailOpen = false }); err != nil {
+		t.Fatal(err)
+	}
+	st2, _ := Load(path, DefaultClient)
+	if st2.Get().Tunnel.FailOpen {
+		t.Fatal("migration overrode a v4 user setting")
+	}
+}
+
+func TestV5SlowsSwitchingAndKeepsCustomValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(path, []byte(`{"configVersion":4,"bonding":{"directAfterSec":15,"bondAfterSec":45,"copiesDownAfterSec":10,"directGuard":false},"tunnel":{"failOpen":true,"pinConnections":false}}`), 0o600)
+	st, err := Load(path, DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := st.Get()
+	if c.Bonding.DirectAfterSec != 60 || c.Bonding.CopiesDownAfterSec != 30 {
+		t.Fatalf("old defaults not migrated: %+v", c.Bonding)
+	}
+	if c.Bonding.BondAfterSec != 45 {
+		t.Fatalf("custom bondAfterSec overwritten: %d", c.Bonding.BondAfterSec)
+	}
+	if !c.Bonding.DirectGuard || !c.Tunnel.PinConnections || c.Bonding.DirectGuardMinutes != 60 {
+		t.Fatalf("new features not on after migration: guard=%v pin=%v", c.Bonding.DirectGuard, c.Tunnel.PinConnections)
+	}
+}

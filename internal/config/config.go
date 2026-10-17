@@ -55,8 +55,10 @@ type Bonding struct {
 	RejoinAbovePct         float64 `json:"rejoinAbovePct" label:"Bring a link back above" help:"A stopped link rejoins once its reliability climbs back above this (must be higher than the stop threshold, so links don't bounce)." min:"2" max:"100" step:"1" unit:"%"`
 	ReliabilityFallSec     int     `json:"reliabilityFallSec" label:"Reliability: react to failures within" help:"How quickly a link's reliability drops when it stops delivering." min:"1" max:"600" unit:"s" adv:"1"`
 	ReliabilityRiseSec     int     `json:"reliabilityRiseSec" label:"Reliability: earn trust back over" help:"How slowly a link's reliability recovers once it works again." min:"1" max:"3600" unit:"s" adv:"1"`
-	DirectWhenSingle       bool    `json:"directWhenSingle" label:"Go direct with one link" help:"When only one reliable link remains, send traffic straight out of it instead of through the tunnel (no detour via the server, never slower than bonding off). Switching changes your public IP, so streams reconnect once."`
+	DirectWhenSingle       bool    `json:"directWhenSingle" label:"Go direct with one link" help:"When only one reliable link remains, send traffic straight out of it instead of through the tunnel (no detour via the server, never slower than bonding off). In router mode, connections already open stay on the path they started on."`
 	DirectAfterSec         int     `json:"directAfterSec" label:"Go direct after" help:"Only one reliable link for this long before leaving the tunnel." min:"1" max:"600" unit:"s" adv:"1"`
+	DirectGuard            bool    `json:"directGuard" label:"Never slower than direct" help:"Every so often, download a test file through the bond and directly over your best link. If the bond is clearly slower, new connections go direct until a later test shows the bond winning again. A direct link that fails sends traffic back to the bond at once."`
+	DirectGuardMinutes     int     `json:"directGuardMinutes" label:"Compare bond and direct every" help:"How often the never-slower-than-direct check runs (it also runs a few minutes after links change)." min:"5" max:"1440" unit:"min" adv:"1"`
 	BondAfterSec           int     `json:"bondAfterSec" label:"Re-bond after" help:"Two or more reliable links for this long before going back through the tunnel." min:"1" max:"3600" unit:"s" adv:"1"`
 	CopiesDownAfterSec     int     `json:"copiesDownAfterSec" label:"Reduce copies after" help:"Fewer copies only once links have stayed reliable this long (more copies apply immediately)." min:"1" max:"600" unit:"s" adv:"1"`
 	Shaping                bool    `json:"shaping" label:"Smooth bursts" help:"Send on each link at about the rate it actually delivers instead of in line-rate bursts that overflow small buffers (e.g. satellite downlinks)."`
@@ -80,12 +82,15 @@ type Health struct {
 }
 
 type Tunnel struct {
-	InterfaceName string `json:"interfaceName" label:"Adapter name" help:"Name of the virtual adapter (macOS always uses utunN)." adv:"1"`
-	MTU           int    `json:"mtu" label:"MTU" help:"Packet size inside the tunnel. Must leave room for the 16-byte Net-Bond-007 header plus IP/UDP headers on every link." min:"576" max:"9000" unit:"bytes" adv:"1"`
-	FullTunnel    bool   `json:"fullTunnel" label:"Send all traffic" help:"Route all internet traffic through the bond. Turn off to bond only the networks listed below."`
-	Routes        string `json:"routes" label:"Bonded networks" help:"Comma-separated CIDRs routed through the bond when 'Send all traffic' is off."`
-	DNSOverride   bool   `json:"dnsOverride" label:"Bond DNS" help:"Point system DNS at the server so lookups are bonded too."`
-	RouterMode    bool   `json:"routerMode" label:"Router mode" help:"Masquerade traffic from LAN devices into the bond (OpenWrt / Linux gateways)."`
+	InterfaceName  string `json:"interfaceName" label:"Adapter name" help:"Name of the virtual adapter (macOS always uses utunN)." adv:"1"`
+	MTU            int    `json:"mtu" label:"MTU" help:"Packet size inside the tunnel. Must leave room for the 16-byte Net-Bond-007 header plus IP/UDP headers on every link." min:"576" max:"9000" unit:"bytes" adv:"1"`
+	FullTunnel     bool   `json:"fullTunnel" label:"Send all traffic" help:"Route all internet traffic through the bond. Turn off to bond only the networks listed below."`
+	Routes         string `json:"routes" label:"Bonded networks" help:"Comma-separated CIDRs routed through the bond when 'Send all traffic' is off."`
+	DNSOverride    bool   `json:"dnsOverride" label:"Bond DNS" help:"Point system DNS at the server so lookups are bonded too."`
+	RouterMode     bool   `json:"routerMode" label:"Router mode" help:"Masquerade traffic from LAN devices into the bond (OpenWrt / Linux gateways)."`
+	FailOpen       bool   `json:"failOpen" label:"Stay online if the server is down" help:"When the server stops answering on every link, send traffic straight out of your best connection instead of into a dead tunnel. Bonding resumes by itself once the server is back."`
+	PinConnections bool   `json:"pinConnections" label:"Keep connections on their path" help:"Router mode: a connection stays on the path it started on (the bond, or going direct) until it ends, so switching between them only moves new connections and streams don't restart."`
+	FailOpenSec    int    `json:"failOpenSec" label:"Bypass after" help:"How long the server must be silent on every link before bypassing the tunnel." min:"2" max:"300" unit:"s" adv:"1"`
 }
 
 type Interfaces struct {
@@ -150,7 +155,8 @@ func DefaultClient() *Client {
 			ReorderMode: "auto", ReorderMs: 400, Retransmit: true, Shaping: true,
 			AutoScale: true, TargetDeliveryPct: 99.5, BenchBelowPct: 60, RejoinAbovePct: 75,
 			ReliabilityFallSec: 10, ReliabilityRiseSec: 60,
-			DirectWhenSingle: true, DirectAfterSec: 15, BondAfterSec: 30, CopiesDownAfterSec: 10, QueueDepth: 1024, LatencyWeighting: true,
+			DirectWhenSingle: true, DirectAfterSec: 60, BondAfterSec: 300, CopiesDownAfterSec: 30,
+			DirectGuard: true, DirectGuardMinutes: 60, QueueDepth: 1024, LatencyWeighting: true,
 			Pacing: true, PacingStartMbps: 20, PacingDelayMs: 15, PacingLossPct: 10,
 		},
 		Health: Health{
@@ -158,7 +164,7 @@ func DefaultClient() *Client {
 			DegradedRTTMs: 300, DegradedLossPct: 3, DownLossPct: 60, DownAfterMs: 1200,
 			HistorySeconds: 300,
 		},
-		Tunnel: Tunnel{InterfaceName: "net-bond-007", MTU: 1380, FullTunnel: true},
+		Tunnel: Tunnel{InterfaceName: "net-bond-007", MTU: 1380, FullTunnel: true, FailOpen: true, FailOpenSec: 8, PinConnections: true},
 		SpeedTest: SpeedTest{
 			Enabled: true, IntervalHours: 6, OnAddressChange: true, MinGapMinutes: 30,
 			IdleMbps: 1, IdleStepMbps: 1, IdleStepMinutes: 15, IdleMaxMbps: 5, Seconds: 8,
@@ -212,7 +218,7 @@ func (c *Client) Validate() error {
 	return errors.Join(errs...)
 }
 
-const clientConfigVersion = 3
+const clientConfigVersion = 5
 
 // Normalize fills zero values left by older or hand-edited config files and
 // migrates defaults that changed between versions.
@@ -236,6 +242,30 @@ func (c *Client) Normalize() {
 			c.Tunnel.InterfaceName = d.Tunnel.InterfaceName
 		}
 		c.Interfaces.Exclude = strings.ReplaceAll(c.Interfaces.Exclude, platformLegacyName+"*", d.Tunnel.InterfaceName+"*")
+	}
+	if c.Version < 4 {
+		// v4 added fail-open; older files have no key for it, and it should
+		// be on unless switched off.
+		c.Tunnel.FailOpen = true
+	}
+	if c.Version < 5 {
+		// v5 added connection pinning and the never-slower-than-direct guard
+		// (on unless switched off), and slowed mode switching: the old 15 s /
+		// 30 s / 10 s defaults flipped paths every few minutes on Starlink
+		// next to a phone. Values the user changed are kept.
+		c.Tunnel.PinConnections, c.Bonding.DirectGuard = true, true
+		for _, m := range []struct {
+			v       *int
+			old, nu int
+		}{
+			{&c.Bonding.DirectAfterSec, 15, d.Bonding.DirectAfterSec},
+			{&c.Bonding.BondAfterSec, 30, d.Bonding.BondAfterSec},
+			{&c.Bonding.CopiesDownAfterSec, 10, d.Bonding.CopiesDownAfterSec},
+		} {
+			if *m.v == m.old {
+				*m.v = m.nu
+			}
+		}
 	}
 	c.Version = clientConfigVersion
 }

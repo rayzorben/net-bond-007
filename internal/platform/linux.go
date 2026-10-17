@@ -82,11 +82,14 @@ func have(bin string) bool { _, err := exec.LookPath(bin); return err == nil }
 // function that undoes anything not removed automatically with the device.
 func ConfigureTunnel(t TunnelSpec) (func(), error) {
 	dev := t.Name
-	steps := [][]string{
-		{"ip", "addr", "flush", "dev", dev},
-		{"ip", "addr", "add", t.Addr.String(), "dev", dev},
-		{"ip", "link", "set", "dev", dev, "mtu", fmt.Sprint(t.MTU), "up"},
+	var steps [][]string
+	// Leave a correct address alone: removing it makes the kernel drop
+	// every connection masqueraded through the device, which reset all
+	// open connections each time the bond switched to or from direct.
+	if out, _ := exec.Command("ip", "-4", "-o", "addr", "show", "dev", dev).Output(); strings.Count(string(out), " inet ") != 1 || !strings.Contains(string(out), " "+t.Addr.String()+" ") {
+		steps = append(steps, []string{"ip", "addr", "flush", "dev", dev}, []string{"ip", "addr", "add", t.Addr.String(), "dev", dev})
 	}
+	steps = append(steps, []string{"ip", "link", "set", "dev", dev, "mtu", fmt.Sprint(t.MTU), "up"})
 	var undo []func()
 	for _, r := range t.Routes {
 		switch {

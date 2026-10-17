@@ -95,10 +95,10 @@ func (c *Client) StartAB(url string, rounds int) error {
 			for _, path := range []string{"direct", "bonded"} {
 				var r ABRound
 				if path == "bonded" {
-					r = abDownload(url, tunName, tunIdx, tunIP)
+					r = abDownload(url, tunName, tunIdx, tunIP, 0)
 					r.Via = tunName
 				} else {
-					r = abDownload(url, direct.iface.Name, direct.iface.Index, direct.iface.PrimaryIPv4())
+					r = abDownload(url, direct.iface.Name, direct.iface.Index, direct.iface.PrimaryIPv4(), 0)
 					r.Via = direct.iface.Name
 				}
 				r.Path = path
@@ -145,8 +145,9 @@ func (c *Client) bestPhysical() *clink {
 	return best
 }
 
-// abDownload fetches url with every socket pinned to one interface.
-func abDownload(url, ifName string, ifIndex int, src netip.Addr) ABRound {
+// abDownload fetches url with every socket pinned to one interface. A
+// positive maxDur stops the transfer early and rates what arrived.
+func abDownload(url, ifName string, ifIndex int, src netip.Addr, maxDur time.Duration) ABRound {
 	var r ABRound
 	d := &net.Dialer{Timeout: 10 * time.Second, Control: platform.BindControl(ifName, ifIndex)}
 	if src.IsValid() {
@@ -179,7 +180,14 @@ func abDownload(url, ifName string, ifIndex int, src netip.Addr) ABRound {
 		r.Error = resp.Status
 		return r
 	}
-	n, err := io.Copy(io.Discard, resp.Body)
+	var body io.Reader = resp.Body
+	if maxDur > 0 {
+		body = &deadlineReader{r: resp.Body, until: start.Add(maxDur)}
+	}
+	n, err := io.Copy(io.Discard, body)
+	if err == errDeadline {
+		err = nil
+	}
 	el := time.Since(start).Seconds()
 	r.Bytes, r.Seconds = n, el
 	if el > 0 {
@@ -189,6 +197,20 @@ func abDownload(url, ifName string, ifIndex int, src netip.Addr) ABRound {
 		r.Error = err.Error()
 	}
 	return r
+}
+
+var errDeadline = errors.New("time limit reached")
+
+type deadlineReader struct {
+	r     io.Reader
+	until time.Time
+}
+
+func (d *deadlineReader) Read(p []byte) (int, error) {
+	if time.Now().After(d.until) {
+		return 0, errDeadline
+	}
+	return d.r.Read(p)
 }
 
 func summarize(rs []ABRound, path string) ABSummary {

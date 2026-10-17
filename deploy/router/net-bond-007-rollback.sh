@@ -24,6 +24,17 @@ nft delete table inet net_bond_007 2>/dev/null
 ip route del 0.0.0.0/1 dev net-bond-007 2>/dev/null
 ip route del 128.0.0.0/1 dev net-bond-007 2>/dev/null
 ip link del net-bond-007 2>/dev/null
+# Connection pinning (0.7.2+) and the router-DNS-via-tunnel rules.
+nft delete table ip net_bond_007_pin 2>/dev/null
+while ip rule del pref 5899 2>/dev/null; do :; done
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  while ip rule del pref $((5900 + i)) 2>/dev/null; do :; done
+  ip route flush table $((7100 + i)) 2>/dev/null
+done
+for d in $(ip rule | awk '/lookup 7007/ {print $5}'); do
+  while ip rule del to "$d" lookup 7007 2>/dev/null; do :; done
+done
+ip route flush table 7007 2>/dev/null
 
 # Restore GL multi-WAN to its pre-install state.
 if [ -f /root/net-bond-007-pre-kmwan ]; then

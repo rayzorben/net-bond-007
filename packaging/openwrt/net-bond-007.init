@@ -10,6 +10,8 @@ start_service() {
 	# Routers have little RAM: keep the Go heap small.
 	procd_set_param env GOMEMLIMIT=40MiB GOGC=50 GODEBUG=multipathtcp=0
 	procd_set_param respawn 3600 2 0
+	# Time to remove routes and rules on stop; SIGKILL would strand them.
+	procd_set_param term_timeout 15
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance

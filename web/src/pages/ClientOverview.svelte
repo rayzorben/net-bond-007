@@ -45,10 +45,13 @@
 
   // Plain-English summary of what automatic scaling is doing right now.
   const autoHelp = $derived.by(() => {
+    if (st.tunnel.bypass) return `Server unreachable: traffic goes straight out over ${st.tunnel.bypass} until it answers again`
     const a = st.auto
     if (!a) return null
     const n = live.filter((l) => !l.benched).length
     const bench = a.benched?.length ? ` · ${a.benched.join(', ')} benched (still monitored)` : ''
+    const g = a.guard
+    if (a.mode === 'direct' && g?.active) return `Automatic: going direct over ${a.directVia}: the bond tested slower (${g.bondedMbps?.toFixed(0)} vs ${g.directMbps?.toFixed(0)} Mbit/s), so new connections skip it; existing ones stay put${bench}`
     switch (a.mode) {
       case 'direct': return `Automatic: going direct over ${a.directVia}: it's the only reliable link, so the tunnel is bypassed${bench}`
       case 'balancing': return `Automatic: links are reliable, load-balancing across ${n} for speed${bench}`

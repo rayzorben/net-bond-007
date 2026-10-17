@@ -55,3 +55,35 @@ func TestParseAdGuardUpstreams(t *testing.T) {
 		t.Fatalf("got %v, want %s", got, want)
 	}
 }
+
+func TestPinNftRules(t *testing.T) {
+	s := PinSpec{LAN: []string{"br-lan"}, Current: 2, Paths: []PinPath{
+		{Index: 1, Dev: "net-bond-007", Dead: true},
+		{Index: 2, Dev: "eth0"},
+	}}
+	rules := PinNftRules(s)
+	for _, want := range []string{
+		`iifname { "br-lan" } ct state new ct mark & 0x0f000000 == 0 ct mark set ct mark & 0xf0ffffff | 0x02000000`,
+		`ct mark & 0x0f000000 == 0x01000000 meta mark set meta mark & 0xf0ffffff | 0x01000000`,
+		`ct mark & 0x0f000000 == 0x02000000 meta mark set meta mark & 0xf0ffffff | 0x02000000`,
+		`ct mark & 0x0f000000 == 0x01000000 meta l4proto tcp reject with tcp reset`,
+	} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("missing %q in\n%s", want, rules)
+		}
+	}
+	if strings.Contains(rules, "0x02000000 meta l4proto tcp reject") {
+		t.Fatal("a live path is being reset")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft not installed")
+	}
+	cmd := exec.Command("nft", "--check", "-f", "-")
+	cmd.Stdin = strings.NewReader(rules)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "Operation not permitted") {
+			t.Skip("nft --check needs privileges")
+		}
+		t.Fatalf("nft rejected ruleset: %v\n%s", err, out)
+	}
+}

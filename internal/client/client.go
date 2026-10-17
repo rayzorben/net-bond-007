@@ -67,6 +67,7 @@ type Client struct {
 	// redeployed server (e.g. a recreated cloud container) may get a new IP.
 	resolvedAt  time.Time
 	lastHealthy time.Time
+	fail        failOpen // guarded by mu
 
 	ack     atomic.Pointer[proto.HelloAck]
 	tunMu   sync.Mutex
@@ -74,6 +75,8 @@ type Client struct {
 	tunSpec platform.TunnelSpec
 	tunUndo func()
 	tunErr  string
+	pins    pinState // guarded by tunMu
+	guard   guardState
 
 	relays     relays
 	names      names.Cache
@@ -571,7 +574,10 @@ func (c *Client) tick(now time.Time) {
 		e.SetReorderHold(hold)
 	}
 	c.meter(now, cfg, links)
+	c.guardTick(now, cfg, links)
 	c.autoScale(now, cfg, e, links)
+	c.failOpenTick(now, cfg, links)
+	c.pinTick(cfg)
 	e.Tick(now)
 	if now.UnixNano()-c.policySent.Load() > int64(5*time.Second) && c.ack.Load() != nil {
 		pol := c.wirePolicy()
@@ -645,7 +651,10 @@ func (c *Client) applyTunnel() {
 		// with the bond instead of riding a dead WAN.
 		spec.ViaTunnel = platform.RouterDNSUpstreams()
 	}
-	if p := c.plan.Load(); p != nil && p.Direct {
+	if via := c.bypassVia(); via != "" {
+		// Fail-open: the server is unreachable on every link.
+		spec.Direct, spec.DirectDev = true, via
+	} else if p := c.plan.Load(); p != nil && p.Direct {
 		// Single reliable link: send traffic straight out of it.
 		c.mu.Lock()
 		for _, l := range c.links {
@@ -654,10 +663,10 @@ func (c *Client) applyTunnel() {
 			}
 		}
 		c.mu.Unlock()
-		if spec.Direct {
-			spec.DirectGW = platform.DefaultGateway(spec.DirectDev)
-			spec.DNS = netip.Addr{}
-		}
+	}
+	if spec.Direct {
+		spec.DirectGW = platform.DefaultGateway(spec.DirectDev)
+		spec.DNS = netip.Addr{}
 	}
 
 	c.tunMu.Lock()
@@ -689,8 +698,9 @@ func (c *Client) applyTunnel() {
 		return
 	}
 	c.tunErr = ""
+	c.refreshPinsLocked(cfg)
 	if spec.Direct {
-		c.log.Info("going direct: only one reliable link", "via", spec.DirectDev, "gateway", spec.DirectGW)
+		c.log.Info("going direct, bypassing the tunnel", "via", spec.DirectDev, "gateway", spec.DirectGW)
 		return
 	}
 	c.log.Info("virtual adapter up", "name", spec.Name, "ip", spec.Addr, "routes", len(spec.Routes), "dns", spec.DNS)
@@ -709,6 +719,7 @@ func (c *Client) closeTunnel() {
 }
 
 func (c *Client) closeTunnelLocked() {
+	c.clearPinsLocked()
 	if c.tunUndo != nil {
 		c.tunUndo()
 		c.tunUndo = nil
@@ -741,6 +752,9 @@ type TunnelView struct {
 	Routes  int    `json:"routes"`
 	DNS     string `json:"dns,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Bypass is the link carrying traffic directly while the server is
+	// unreachable (fail-open); empty while bonding normally.
+	Bypass string `json:"bypass,omitempty"`
 }
 
 type IfaceView struct {
@@ -860,6 +874,7 @@ func (c *Client) Snapshot(history int) StateView {
 	}
 	v.Tunnel.Error = c.tunErr
 	c.tunMu.Unlock()
+	v.Tunnel.Bypass = c.bypassVia()
 	if c.NoTunnel {
 		v.Tunnel.Error = ""
 	}
@@ -875,7 +890,11 @@ func (c *Client) Snapshot(history int) StateView {
 				av.Benched = append(av.Benched, l.Name)
 			}
 		}
+		av.Guard = c.guardView()
 		v.Auto = av
+	}
+	if v.Tunnel.Bypass != "" {
+		v.Warnings = append(v.Warnings, "The server is not answering, so traffic goes straight out over "+v.Tunnel.Bypass+" to keep you online. Bonding resumes by itself when the server is back.")
 	}
 	if cfg.Server.Token == "" && cfg.Server.Address != "" {
 		v.Warnings = append(v.Warnings, "No access token set.")
@@ -1046,6 +1065,8 @@ type AutoView struct {
 	Direct    bool     `json:"direct"`
 	DirectVia string   `json:"directVia,omitempty"`
 	Benched   []string `json:"benched,omitempty"`
+	// Guard is the never-slower-than-direct check (nil until it has run).
+	Guard *GuardView `json:"guard,omitempty"`
 }
 
 func autoCopies(p *bond.Plan) int {
@@ -1118,6 +1139,7 @@ func (c *Client) autoScale(now time.Time, cfg *config.Client, e *bond.Engine, li
 		BondAfter:        time.Duration(b.BondAfterSec) * time.Second,
 		CopiesDownAfter:  time.Duration(b.CopiesDownAfterSec) * time.Second,
 	})
+	c.applyGuard(&p)
 	for _, l := range links {
 		l.link.SetBenched(p.Benched[l.id])
 	}
