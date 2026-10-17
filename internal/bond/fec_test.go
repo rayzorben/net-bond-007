@@ -309,3 +309,69 @@ func TestRepairsJumpTheQueue(t *testing.T) {
 		t.Fatalf("send order %q, want aRbc", order)
 	}
 }
+
+func TestStormMeter(t *testing.T) {
+	var m stormMeter
+	now := time.Now().UnixNano()
+	// Steady random loss (one every 50 ms) is not a storm.
+	for i := 0; i < 40; i++ {
+		m.loss(now + int64(i)*int64(50*time.Millisecond))
+	}
+	if m.active(now + int64(2*time.Second)) {
+		t.Fatal("steady random loss read as a storm")
+	}
+	// 16 losses within 100 ms are.
+	at := now + int64(10*time.Second)
+	for i := 0; i < stormLosses; i++ {
+		m.loss(at + int64(i)*int64(6*time.Millisecond))
+	}
+	if !m.active(at + int64(100*time.Millisecond)) {
+		t.Fatal("burst not detected")
+	}
+	if m.active(at + int64(100*time.Millisecond) + int64(stormHold) + 1) {
+		t.Fatal("storm never ended")
+	}
+}
+
+// Repairs avoid a link in a loss storm while a calm link can carry them,
+// even when the stormy link is faster.
+func TestRepairsAvoidStormingLink(t *testing.T) {
+	e := New(1, func([]byte) {})
+	defer e.Close()
+	fast := e.AddLink(1, "starlink", "sim", func([]byte) error { return nil })
+	slow := e.AddLink(2, "phone", "sim", func([]byte) error { return nil })
+	fast.SetOneWayDelay(20 * time.Millisecond)
+	slow.SetOneWayDelay(45 * time.Millisecond)
+	for _, l := range []*Link{fast, slow} {
+		l.SetState(StateUp)
+	}
+	now := time.Now()
+	nowN := now.UnixNano()
+	cands := []*Link{fast, slow}
+	both := linkBit(fast.ID) | linkBit(slow.ID)
+	if got := repairLinks(cands, cands, both, 0, 1400, nowN, now); len(got) == 0 || got[0] != fast {
+		t.Fatalf("calm links: repair should go on the fastest first, got %v", names(got))
+	}
+	for i := stormLosses; i > 0; i-- {
+		fast.storm.loss(nowN - int64(i)*int64(time.Millisecond))
+	}
+	got := repairLinks(cands, cands, both, 0, 1400, nowN, now)
+	if len(got) == 0 || got[0] != slow {
+		t.Fatalf("storming fastest link: repair should go on the calm one first, got %v", names(got))
+	}
+	// Only stormy links left: still repaired.
+	for i := stormLosses; i > 0; i-- {
+		slow.storm.loss(nowN - int64(i)*int64(time.Millisecond))
+	}
+	if got := repairLinks(cands, cands, both, 0, 1400, nowN, now); len(got) == 0 {
+		t.Fatal("no repair when every link storms")
+	}
+}
+
+func names(ls []*Link) []string {
+	var out []string
+	for _, l := range ls {
+		out = append(out, l.Name)
+	}
+	return out
+}

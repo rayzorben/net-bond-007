@@ -11,6 +11,7 @@
 package bond
 
 import (
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -690,14 +691,26 @@ func repairLinks(cands, all []*Link, carriers uint64, tries uint8, wire int, now
 		}
 	}
 	allowed := func(l *Link) bool { return !l.Metered() || !origAlive || l.meterHas(wire) }
+	// A link in a loss storm would most likely lose the repair too: use it
+	// only when no calm link can carry it.
+	calm := false
+	for _, l := range cands {
+		calm = calm || (!l.Storming(nowN) && allowed(l))
+	}
 	var out []*Link
-	for _, fresh := range []bool{true, false} { // other links first, then any
+	for _, pass := range []struct{ fresh, calmOnly bool }{{true, true}, {false, true}, {true, false}, {false, false}} {
+		if pass.calmOnly && !calm {
+			continue
+		}
 		for _, l := range cands {
-			if len(out) == 2 || (fresh && carriers&linkBit(l.ID) != 0) || !allowed(l) {
+			if len(out) == 2 || (pass.fresh && carriers&linkBit(l.ID) != 0) || !allowed(l) ||
+				(pass.calmOnly && l.Storming(nowN)) || slices.Contains(out, l) {
 				continue
 			}
-			if len(out) == 1 && (out[0] == l || l.QueueDrain(now) >= 100*time.Millisecond) {
-				continue // a second copy only helps if it can arrive promptly
+			// A second copy only helps if it can arrive promptly. Repairs go
+			// ahead of queued data, so the data queue doesn't matter here.
+			if len(out) == 1 && l.RepairDelay(now) >= out[0].RepairDelay(now)+100*time.Millisecond {
+				continue
 			}
 			out = append(out, l)
 		}
@@ -741,6 +754,12 @@ func (e *Engine) HandleNack(frame []byte) {
 			}
 			budget--
 			carriers, tries := e.rtx.carriers(r.Start + i)
+			// Every link that carried a copy (or an earlier repair) lost it.
+			for _, l := range all {
+				if carriers&linkBit(l.ID) != 0 {
+					l.storm.loss(nowN)
+				}
+			}
 			if tries == 0 && r.Count == 1 {
 				// An isolated loss on every link that carried it sizes FEC.
 				// Bursts (a buffer overflowing) are not counted: one parity

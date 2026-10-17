@@ -78,6 +78,8 @@ type Link struct {
 	FECRecovered atomic.Uint64 // packets rebuilt from this link's parity
 	peerFEC      atomic.Uint64 // the peer's FECRecovered for this link
 	lossLost     atomic.Uint64 // packets the peer NACKed that went only on this link
+	// Recent losses on this link (sender side), to spot a loss storm.
+	storm stormMeter
 	// FEC sizing state, guarded by healthMu.
 	fecLastTx, fecLastLost uint64
 	fecLoss                float64

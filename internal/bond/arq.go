@@ -123,6 +123,46 @@ func (b *rtxBuffer) get(seq uint64) ([]byte, bool) {
 	return append([]byte(nil), e.pkt...), true
 }
 
+// stormMeter spots a loss storm on a link from the sender's side: many
+// losses on it within a short window. Starlink has multi-second storms around
+// some satellite handovers (seen in the field: 20-200 ms outages mixed with
+// heavy loss for 5-7 s). A repair sent back into the storm is lost again,
+// costing the receiver another NACK round each time, and the inner TCP
+// stalls for seconds. Repairs avoid a storming link while another can carry
+// them.
+type stormMeter struct {
+	mu    sync.Mutex
+	ring  [stormLosses]int64 // unix nanos of the latest losses
+	pos   int
+	until int64
+}
+
+const (
+	stormLosses = 16                     // this many losses ...
+	stormWindow = 200 * time.Millisecond // ... within this long is a storm
+	stormHold   = time.Second            // and the link stays suspect this long
+)
+
+func (m *stormMeter) loss(nowN int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ring[m.pos] = nowN
+	m.pos = (m.pos + 1) % stormLosses
+	// The ring now holds the latest stormLosses losses; m.pos is the oldest.
+	if oldest := m.ring[m.pos]; oldest != 0 && nowN-oldest < int64(stormWindow) {
+		m.until = nowN + int64(stormHold)
+	}
+}
+
+func (m *stormMeter) active(nowN int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return nowN < m.until
+}
+
+// Storming reports whether the link is in a loss storm (sender's view).
+func (l *Link) Storming(nowN int64) bool { return l.storm.active(nowN) }
+
 type gap struct {
 	detected time.Time
 	lastNack time.Time
