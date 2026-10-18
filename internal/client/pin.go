@@ -29,8 +29,12 @@ type pinState struct {
 // time, and those streams survive if left alone.
 const pinDeadAfter = 15 * time.Second
 
+// pinsWanted: pinning sends every new LAN connection down the current path,
+// so it only makes sense while the tunnel carries all LAN traffic (full
+// tunnel). With split routes, or none (testing the bond with traffic bound
+// to its interface), it would pull the whole LAN into the tunnel.
 func (c *Client) pinsWanted(cfg *config.Client) bool {
-	return cfg.Tunnel.RouterMode && cfg.Tunnel.PinConnections && platform.PinsSupported()
+	return cfg.Tunnel.RouterMode && cfg.Tunnel.PinConnections && cfg.Tunnel.FullTunnel && platform.PinsSupported()
 }
 
 // refreshPinsLocked brings pinning in line with the current tunnel spec and

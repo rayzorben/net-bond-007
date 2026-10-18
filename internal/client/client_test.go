@@ -10,6 +10,7 @@ import (
 	"github.com/rayzorben/net-bond-007/internal/bond"
 
 	"github.com/rayzorben/net-bond-007/internal/config"
+	"github.com/rayzorben/net-bond-007/internal/platform"
 )
 
 func TestMergeConfigReplacesLinkOverrides(t *testing.T) {
@@ -81,5 +82,20 @@ func TestABVerdict(t *testing.T) {
 	}
 	if !strings.Contains(verdict(ABSummary{}, ABSummary{OK: 1, Mbps: 5}), "failed") {
 		t.Error("bonded failure not reported")
+	}
+}
+
+// Pinning only applies while the tunnel carries all LAN traffic: with full
+// tunnel off it would pull every new LAN connection into the tunnel anyway.
+func TestPinsOnlyWithFullTunnel(t *testing.T) {
+	cfg := config.DefaultClient()
+	cfg.Tunnel.RouterMode, cfg.Tunnel.PinConnections, cfg.Tunnel.FullTunnel = true, true, false
+	c := New(config.NewMemory(cfg), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if c.pinsWanted(cfg) {
+		t.Fatal("pinning wanted with full tunnel off")
+	}
+	cfg.Tunnel.FullTunnel = true
+	if c.pinsWanted(cfg) != platform.PinsSupported() {
+		t.Fatal("pinning not wanted in full-tunnel router mode")
 	}
 }
