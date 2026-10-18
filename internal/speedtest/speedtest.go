@@ -23,11 +23,30 @@ type Options struct {
 	Duration time.Duration // per direction
 	Streams  int           // parallel transfers
 	MaxBytes int64         // stop a direction early once this much moved
+	// RequestBytes is the size of each download request and upload body
+	// (default 25 MB). Fast hosts use bigger ones: fewer requests, so the
+	// endpoint's rate limit is not hit.
+	RequestBytes int64
 	// NewClient returns an HTTP client for one stream (and for pings).
 	NewClient func() *http.Client
 }
 
 func (o Options) base() string { return strings.TrimRight(o.URL, "/") }
+
+func (o Options) reqBytes() int64 {
+	if o.RequestBytes > 0 {
+		return o.RequestBytes
+	}
+	return 25_000_000
+}
+
+// errStop ends a stream for good: the endpoint is refusing (rate limit), and
+// retrying would only hammer it.
+var errStop = errors.New("stop")
+
+type statusError struct{ status string }
+
+func (e statusError) Error() string { return e.status }
 
 // Ping returns the median time of a few empty requests in milliseconds
 // (the first, which includes the TCP and TLS handshakes, is not counted),
@@ -58,14 +77,14 @@ func Ping(o Options) float64 {
 // Download measures download bandwidth in Mbit/s and returns the bytes moved.
 func Download(o Options) (mbps, total float64, err error) {
 	return measure(o, func(ctx context.Context, cl *http.Client, n *atomic.Int64) error {
-		req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/__down?bytes=%d", o.base(), 25_000_000), nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/__down?bytes=%d", o.base(), o.reqBytes()), nil)
 		resp, err := cl.Do(req)
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return errors.New(resp.Status)
+			return statusError{resp.Status}
 		}
 		buf := make([]byte, 32<<10)
 		for {
@@ -81,7 +100,7 @@ func Download(o Options) (mbps, total float64, err error) {
 // Upload measures upload bandwidth in Mbit/s and returns the bytes moved.
 func Upload(o Options) (mbps, total float64, err error) {
 	return measure(o, func(ctx context.Context, cl *http.Client, n *atomic.Int64) error {
-		body := &countingZeros{left: 25_000_000, n: n}
+		body := &countingZeros{left: o.reqBytes(), n: n}
 		req, _ := http.NewRequestWithContext(ctx, "POST", o.base()+"/__up", body)
 		req.ContentLength = body.left
 		req.Header.Set("Content-Type", "application/octet-stream")
@@ -91,18 +110,24 @@ func Upload(o Options) (mbps, total float64, err error) {
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return statusError{resp.Status}
+		}
 		return nil
 	})
 }
 
 // measure runs o.Streams parallel transfers for o.Duration and returns the
 // rate in Mbit/s, ignoring the first second (connection setup and slow
-// start), plus the total bytes moved.
+// start), plus the total bytes moved. If nothing moved after that first
+// second (a very fast link hit the data cap or a rate limit early), the rate
+// is taken over the whole time data was flowing instead.
 func measure(o Options, transfer func(context.Context, *http.Client, *atomic.Int64) error) (mbps, total float64, err error) {
 	d := o.Duration
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	var n atomic.Int64
+	var lastByte atomic.Int64 // unix nanos of the latest progress
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	for i := 0; i < max(o.Streams, 1); i++ {
@@ -116,18 +141,31 @@ func measure(o Options, transfer func(context.Context, *http.Client, *atomic.Int
 					errMu.Lock()
 					err = e
 					errMu.Unlock()
+					var se statusError
+					if errors.As(e, &se) && strings.HasPrefix(se.status, "429") {
+						return // rate limited: don't hammer the endpoint
+					}
 					time.Sleep(200 * time.Millisecond)
 				}
 			}
 		}()
 	}
-	go func() { // stop early once the data cap is reached
+	t0 := time.Now()
+	go func() { // stop early once the data cap is reached; note progress
+		last := int64(0)
 		for ctx.Err() == nil && (o.MaxBytes <= 0 || n.Load() < o.MaxBytes) {
+			if v := n.Load(); v != last {
+				last = v
+				lastByte.Store(time.Now().UnixNano())
+			}
 			time.Sleep(20 * time.Millisecond)
+		}
+		if n.Load() != last {
+			lastByte.Store(time.Now().UnixNano())
 		}
 		cancel()
 	}()
-	start, b0 := time.Now(), int64(0)
+	start, b0 := t0, int64(0)
 	select {
 	case <-time.After(min(time.Second, d/4)):
 		start, b0 = time.Now(), n.Load()
@@ -139,6 +177,11 @@ func measure(o Options, transfer func(context.Context, *http.Client, *atomic.Int
 	wg.Wait()
 	if el > 0 {
 		mbps = float64(b1-b0) * 8 / el / 1e6
+	}
+	if b1 == b0 && b1 > 0 {
+		if flow := time.Duration(lastByte.Load() - t0.UnixNano()); flow > 0 {
+			mbps = float64(b1) * 8 / flow.Seconds() / 1e6
+		}
 	}
 	return mbps, float64(n.Load()), err
 }
