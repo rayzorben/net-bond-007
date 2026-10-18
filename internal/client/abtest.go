@@ -14,6 +14,7 @@ import (
 
 	"github.com/rayzorben/net-bond-007/internal/bond"
 	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/speedtest"
 )
 
 // A/B test: download the same file through the bond and directly over the
@@ -169,7 +170,9 @@ func abDownload(url, ifName string, ifIndex int, src netip.Addr, maxDur time.Dur
 	}
 	cl := &http.Client{Transport: tr, Timeout: 60 * time.Second}
 	start := time.Now()
-	resp, err := cl.Get(url)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", speedtest.UserAgent) // some hosts drop Go's default
+	resp, err := cl.Do(req)
 	if err != nil {
 		r.Error = err.Error()
 		return r

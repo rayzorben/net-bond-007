@@ -20,13 +20,17 @@ import (
 // direct link that stops working sends traffic back to the bond at once.
 
 const (
-	guardURL        = "https://speed.cloudflare.com/__down?bytes=25000000"
-	guardRoundLimit = 6 * time.Second
-	guardRounds     = 2
-	guardSettle     = 3 * time.Minute // after links change, before testing
-	guardEnterRatio = 0.85            // go direct when bonded < 85% of direct
-	guardLeaveRatio = 1.05            // back to the bond above 105%
-	guardFailAfter  = 5 * time.Second // direct link unusable this long: back to the bond
+	guardURL = "https://speed.cloudflare.com/__down?bytes=25000000"
+	// guardFallbackURL is used when either path is refused the first URL
+	// (Cloudflare rate-limits busy datacenter addresses, such as a bond
+	// server's): both paths must be measured against the same source.
+	guardFallbackURL = "https://cachefly.cachefly.net/100mb.test"
+	guardRoundLimit  = 6 * time.Second
+	guardRounds      = 2
+	guardSettle      = 3 * time.Minute // after links change, before testing
+	guardEnterRatio  = 0.85            // go direct when bonded < 85% of direct
+	guardLeaveRatio  = 1.05            // back to the bond above 105%
+	guardFailAfter   = 5 * time.Second // direct link unusable this long: back to the bond
 )
 
 type guardState struct {
@@ -152,12 +156,24 @@ func (c *Client) guardTest() {
 		tunIP, _ = netip.ParseAddr(a.ClientIP)
 	}
 	var rounds []ABRound
-	for i := 0; i < guardRounds; i++ {
-		d := abDownload(guardURL, direct.iface.Name, direct.iface.Index, direct.iface.PrimaryIPv4(), guardRoundLimit)
-		d.Path = "direct"
-		b := abDownload(guardURL, tun.Name(), tun.Index(), tunIP, guardRoundLimit)
-		b.Path = "bonded"
-		rounds = append(rounds, d, b)
+	for _, u := range []string{guardURL, guardFallbackURL} {
+		rounds = rounds[:0]
+		refused := false
+		for i := 0; i < guardRounds && !refused; i++ {
+			d := abDownload(u, direct.iface.Name, direct.iface.Index, direct.iface.PrimaryIPv4(), guardRoundLimit)
+			d.Path = "direct"
+			b := abDownload(u, tun.Name(), tun.Index(), tunIP, guardRoundLimit)
+			b.Path = "bonded"
+			refused = refusedStatus(d.Error) || refusedStatus(b.Error)
+			rounds = append(rounds, d, b)
+		}
+		if !refused {
+			break
+		}
+		// A refusal says nothing about speed: never let it count as "the
+		// bond is slower" (that sent the whole LAN direct). Try the next
+		// source; if every source refuses, the comparison is skipped below.
+		rounds = rounds[:0]
 	}
 	bs, ds := summarize(rounds, "bonded"), summarize(rounds, "direct")
 
@@ -188,6 +204,12 @@ func (c *Client) guardTest() {
 		c.log.Info("never slower than direct: compared", "direct", g.active,
 			"bonded_mbps", fmt.Sprintf("%.1f", bs.Mbps), "direct_mbps", fmt.Sprintf("%.1f", ds.Mbps))
 	}
+}
+
+// refusedStatus reports whether a download error is the server refusing
+// (an HTTP 4xx status such as 429 rate limiting) rather than the path failing.
+func refusedStatus(err string) bool {
+	return len(err) >= 3 && err[0] == '4' && err[1] >= '0' && err[1] <= '9' && err[2] >= '0' && err[2] <= '9'
 }
 
 // applyGuard turns the plan direct while the guard is active.

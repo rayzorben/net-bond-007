@@ -25,3 +25,15 @@ func TestApplyGuard(t *testing.T) {
 		t.Fatal("went direct over a link the bond is not using")
 	}
 }
+
+// A refused download (rate limit) is not "the bond is slower".
+func TestRefusedStatus(t *testing.T) {
+	for e, want := range map[string]bool{
+		"429 Too Many Requests": true, "403 Forbidden": true,
+		"500 Internal Server Error": false, "dial tcp: i/o timeout": false, "": false, "4": false,
+	} {
+		if refusedStatus(e) != want {
+			t.Errorf("refusedStatus(%q) = %v", e, !want)
+		}
+	}
+}
