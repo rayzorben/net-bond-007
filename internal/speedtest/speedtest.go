@@ -17,6 +17,16 @@ import (
 	"time"
 )
 
+// UserAgent goes on every request. Some test hosts (Hetzner's speed files)
+// drop connections from Go's default "Go-http-client".
+var UserAgent = "net-bond-007"
+
+func newRequest(ctx context.Context, method, url string, body io.Reader) *http.Request {
+	req, _ := http.NewRequestWithContext(ctx, method, url, body)
+	req.Header.Set("User-Agent", UserAgent)
+	return req
+}
+
 // Options for one measurement.
 type Options struct {
 	URL      string        // base URL, e.g. https://speed.cloudflare.com
@@ -63,7 +73,7 @@ func Refused(err error) bool {
 func FilePing(cl *http.Client, url string) float64 {
 	var pings []float64
 	for i := 0; i < 3; i++ {
-		req, _ := http.NewRequest("GET", url, nil)
+		req := newRequest(context.Background(), "GET", url, nil)
 		req.Header.Set("Range", "bytes=0-0")
 		start := time.Now()
 		resp, err := cl.Do(req)
@@ -92,7 +102,7 @@ func Ping(o Options) float64 {
 	var pings []float64
 	for i := 0; i < 6; i++ {
 		start := time.Now()
-		resp, err := cl.Get(o.base() + "/__down?bytes=0")
+		resp, err := cl.Do(newRequest(context.Background(), "GET", o.base()+"/__down?bytes=0", nil))
 		if err != nil {
 			continue
 		}
@@ -116,7 +126,7 @@ func Download(o Options) (mbps, total float64, err error) {
 		if o.FileURL != "" {
 			u = o.FileURL
 		}
-		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+		req := newRequest(ctx, "GET", u, nil)
 		resp, err := cl.Do(req)
 		if err != nil {
 			return err
@@ -140,7 +150,7 @@ func Download(o Options) (mbps, total float64, err error) {
 func Upload(o Options) (mbps, total float64, err error) {
 	return measure(o, func(ctx context.Context, cl *http.Client, n *atomic.Int64) error {
 		body := &countingZeros{left: o.reqBytes(), n: n}
-		req, _ := http.NewRequestWithContext(ctx, "POST", o.base()+"/__up", body)
+		req := newRequest(ctx, "POST", o.base()+"/__up", body)
 		req.ContentLength = body.left
 		req.Header.Set("Content-Type", "application/octet-stream")
 		resp, err := cl.Do(req)

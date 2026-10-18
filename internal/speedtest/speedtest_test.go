@@ -42,3 +42,20 @@ func TestRateLimitedFastLinkReportsBurstRate(t *testing.T) {
 		t.Fatalf("kept retrying after a 429: %d refused requests", r)
 	}
 }
+
+// Requests carry our User-Agent: some hosts drop Go's default one.
+func TestRequestsCarryUserAgent(t *testing.T) {
+	var bad atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.UserAgent() != UserAgent {
+			bad.Add(1)
+		}
+	}))
+	defer ts.Close()
+	Ping(Options{URL: ts.URL, NewClient: func() *http.Client { return &http.Client{} }})
+	FilePing(&http.Client{}, ts.URL+"/file")
+	Download(Options{URL: ts.URL, Duration: 300 * time.Millisecond, Streams: 1, NewClient: func() *http.Client { return &http.Client{} }})
+	if bad.Load() != 0 {
+		t.Fatalf("%d requests without the net-bond-007 User-Agent", bad.Load())
+	}
+}

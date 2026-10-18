@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/rayzorben/net-bond-007/internal/speedtest"
 	"os"
 	"os/signal"
 	"runtime"
@@ -28,6 +29,7 @@ var version = buildversion.Version
 
 func main() {
 	client.Version = version
+	speedtest.UserAgent = "net-bond-007/" + version
 	if handled := maybeRunAsService(); handled {
 		return
 	}

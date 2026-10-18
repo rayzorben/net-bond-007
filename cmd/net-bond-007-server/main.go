@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/rayzorben/net-bond-007/internal/speedtest"
 	"os"
 	"os/signal"
 	"runtime"
@@ -21,6 +22,7 @@ var version = buildversion.Version
 
 func main() {
 	server.Version = version
+	speedtest.UserAgent = "net-bond-007/" + version
 	cfg := flag.String("config", envOr("NET_BOND_007_CONFIG", "/data/server.json"), "config file")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
