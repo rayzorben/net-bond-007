@@ -59,6 +59,17 @@ export interface ServerState {
   sessions: SessionView[]
   egress: Record<string, number>
   rejected: number; warnings: string[]
+  speedTest?: ServerSpeed
+}
+
+export interface ServerSpeedResult {
+  at: string; reason: string; downMbps: number; upMbps: number; pingMs: number
+  usedMB: number; limited: boolean; error?: string
+}
+
+export interface ServerSpeed {
+  enabled: boolean; running: boolean; nextAt?: string
+  last?: ServerSpeedResult; history: ServerSpeedResult[]
 }
 
 export type AnyState = ClientState | ServerState

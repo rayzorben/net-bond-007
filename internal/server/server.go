@@ -36,6 +36,8 @@ type Server struct {
 	cfg *config.Store[config.Server]
 	log *slog.Logger
 
+	speed speedState // the server's own internet speed test; see speedtest.go
+
 	lns    atomic.Pointer[[]*packetConn]
 	connMu sync.Mutex
 	listen string
@@ -631,6 +633,7 @@ func (s *Server) janitor() {
 			return
 		case now := <-t.C:
 			s.tick(now)
+			s.speedTick(now)
 		}
 	}
 }
@@ -696,6 +699,7 @@ type StateView struct {
 	TCP      map[string]uint64 `json:"tcp"`
 	Rejected uint64            `json:"rejected"`
 	Warnings []string          `json:"warnings"`
+	Speed    SpeedView         `json:"speedTest"`
 }
 
 func (s *Server) Snapshot(history int) StateView {
@@ -724,6 +728,10 @@ func (s *Server) Snapshot(history int) StateView {
 		v.Warnings = append(v.Warnings, "No dashboard password set.")
 	}
 	v.Warnings = append(v.Warnings, "Traffic between client and server is not encrypted (TLS inside the tunnel still is).")
+	v.Speed = s.speedView()
+	if w := s.speedWarning(); w != "" {
+		v.Warnings = append(v.Warnings, w)
+	}
 	s.mu.RLock()
 	for _, ss := range s.sessions {
 		sv := SessionView{
@@ -824,6 +832,13 @@ func (b Backend) Routes(mux *http.ServeMux) {
 	})
 	// Inner TCP sender state (cwnd, RTT, RTO) per live connection, for
 	// diagnosing slow downloads through the bond.
+	mux.HandleFunc("POST /api/x/speedtest", func(w http.ResponseWriter, r *http.Request) {
+		if err := b.S.RunSpeedTest("manual"); err != nil {
+			webui.WriteJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		webui.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "started"})
+	})
 	mux.HandleFunc("GET /api/x/tcpinfo", func(w http.ResponseWriter, r *http.Request) {
 		webui.WriteJSON(w, http.StatusOK, map[string]any{"connections": append([]string{}, b.S.gw.TCPInfo()...), "stats": b.S.gw.TCPStats()})
 	})

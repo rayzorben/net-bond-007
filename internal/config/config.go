@@ -291,6 +291,7 @@ type Server struct {
 	Egress   ServerEgress   `json:"egress" label:"Internet egress" help:"How the server reaches the internet on behalf of clients."`
 	Sessions ServerSessions `json:"sessions" label:"Sessions"`
 	History  ServerHistory  `json:"history" label:"History" help:"A record on disk of link performance, events and every connection, for looking back at what happened."`
+	Speed    ServerSpeed    `json:"speedTest" label:"Speed test" help:"Measure the server's own internet connection now and then, so a slow or throttled host shows up on the dashboard."`
 	UI       UI             `json:"ui" label:"Dashboard"`
 	Log      Log            `json:"log" label:"Logging"`
 }
@@ -309,6 +310,14 @@ type ServerEgress struct {
 	TCPBufferKB     int    `json:"tcpBufferKB" label:"TCP buffer size" help:"Per-connection receive/send buffer inside the userspace stack." min:"64" max:"16384" unit:"KB" adv:"1"`
 	ICMPEcho        bool   `json:"icmpEcho" label:"Forward ping" help:"Forward ICMP echo (ping) for clients using unprivileged ping sockets." adv:"1"`
 	MaxConnsPerUser int    `json:"maxConnsPerSession" label:"Max connections per client" min:"16" max:"1000000" adv:"1"`
+}
+
+type ServerSpeed struct {
+	Enabled       bool   `json:"enabled" label:"Test the server's internet" help:"Run a download and upload test shortly after start and then every few hours."`
+	IntervalHours int    `json:"intervalHours" label:"Test every" min:"1" max:"168" unit:"h"`
+	Seconds       int    `json:"seconds" label:"Test length" help:"Per direction." min:"3" max:"30" unit:"s" adv:"1"`
+	LimitedMbps   int    `json:"limitedMbps" label:"Warn below" help:"Report the server's internet as limited when download or upload tests slower than this." min:"1" max:"100000" unit:"Mbit/s"`
+	URL           string `json:"url" label:"Test server" help:"A Cloudflare-style speed test endpoint (GET /__down?bytes=N, POST /__up)." adv:"1"`
 }
 
 type ServerHistory struct {
@@ -343,6 +352,7 @@ func DefaultServer() *Server {
 			DefaultQueue: 1024, TrustClientRate: true,
 		},
 		History: ServerHistory{Enabled: true, RetentionDays: 14, SampleSec: 10},
+		Speed:   ServerSpeed{Enabled: true, IntervalHours: 6, Seconds: 6, LimitedMbps: 200, URL: "https://speed.cloudflare.com"},
 		UI:      UI{Listen: ":8080", RefreshMs: 500},
 		Log:     Log{Level: "info"},
 	}

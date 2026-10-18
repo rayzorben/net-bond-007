@@ -4,20 +4,18 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rayzorben/net-bond-007/internal/config"
 	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/speedtest"
 )
 
 // Speed tests: every so often, each connection is tested on its own (sockets
@@ -441,46 +439,14 @@ func runSpeedTest(it platform.Iface, sc config.SpeedTest, phase func(string)) Sp
 	}
 
 	phase("latency")
-	cl := boundClient(it, 10*time.Second)
-	var pings []float64
-	for i := 0; i < 6; i++ {
-		start := time.Now()
-		resp, err := cl.Get(base + "/__down?bytes=0")
-		if err != nil {
-			continue
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if i > 0 { // the first includes the TCP and TLS handshakes
-			pings = append(pings, float64(time.Since(start))/float64(time.Millisecond))
-		}
+	o := speedtest.Options{
+		URL: base, Duration: secs, Streams: speedStreams, MaxBytes: speedMaxBytes,
+		NewClient: func() *http.Client { return boundClient(it, 0) },
 	}
-	cl.CloseIdleConnections()
-	if len(pings) > 0 {
-		sort.Float64s(pings)
-		r.PingMs = pings[len(pings)/2]
-	}
+	r.PingMs = speedtest.Ping(speedtest.Options{URL: base, NewClient: func() *http.Client { return boundClient(it, 10*time.Second) }})
 
 	phase("download")
-	down, usedD, err := measure(secs, func(ctx context.Context, cl *http.Client, n *atomic.Int64) error {
-		req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/__down?bytes=%d", base, 25_000_000), nil)
-		resp, err := cl.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return errors.New(resp.Status)
-		}
-		buf := make([]byte, 32<<10)
-		for {
-			k, err := resp.Body.Read(buf)
-			n.Add(int64(k))
-			if err != nil {
-				return nil
-			}
-		}
-	}, it)
+	down, usedD, err := speedtest.Download(o)
 	r.DownMbps = down
 	if err != nil && down == 0 {
 		r.Error = "download: " + err.Error()
@@ -489,88 +455,11 @@ func runSpeedTest(it platform.Iface, sc config.SpeedTest, phase func(string)) Sp
 	}
 
 	phase("upload")
-	up, usedU, err := measure(secs, func(ctx context.Context, cl *http.Client, n *atomic.Int64) error {
-		body := &countingZeros{left: 25_000_000, n: n}
-		req, _ := http.NewRequestWithContext(ctx, "POST", base+"/__up", body)
-		req.ContentLength = body.left
-		req.Header.Set("Content-Type", "application/octet-stream")
-		resp, err := cl.Do(req)
-		if err != nil {
-			return err
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return nil
-	}, it)
+	up, usedU, err := speedtest.Upload(o)
 	r.UpMbps = up
 	r.UsedMB = (usedD + usedU) / 1e6
 	if err != nil && up == 0 {
 		r.Error = "upload: " + err.Error()
 	}
 	return r
-}
-
-// measure runs speedStreams parallel transfers for d and returns the rate in
-// Mbit/s, ignoring the first second (connection setup and slow start), plus
-// the total bytes moved.
-func measure(d time.Duration, transfer func(context.Context, *http.Client, *atomic.Int64) error, it platform.Iface) (mbps, total float64, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), d)
-	defer cancel()
-	var n atomic.Int64
-	var wg sync.WaitGroup
-	var errMu sync.Mutex
-	for i := 0; i < speedStreams; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			cl := boundClient(it, 0)
-			defer cl.CloseIdleConnections()
-			for ctx.Err() == nil {
-				if e := transfer(ctx, cl, &n); e != nil && ctx.Err() == nil {
-					errMu.Lock()
-					err = e
-					errMu.Unlock()
-					time.Sleep(200 * time.Millisecond)
-				}
-			}
-		}()
-	}
-	go func() { // stop early once the data cap is reached
-		for ctx.Err() == nil && n.Load() < speedMaxBytes {
-			time.Sleep(20 * time.Millisecond)
-		}
-		cancel()
-	}()
-	t0 := time.Now()
-	start, b0 := t0, int64(0)
-	select {
-	case <-time.After(min(time.Second, d/4)):
-		start, b0 = time.Now(), n.Load()
-	case <-ctx.Done(): // hit the data cap during warm-up: use the whole run
-	}
-	<-ctx.Done()
-	el := time.Since(start).Seconds()
-	b1 := n.Load()
-	wg.Wait()
-	if el > 0 {
-		mbps = float64(b1-b0) * 8 / el / 1e6
-	}
-	return mbps, float64(n.Load()), err
-}
-
-// countingZeros is an upload body of zeros that counts what is sent.
-type countingZeros struct {
-	left int64
-	n    *atomic.Int64
-}
-
-func (z *countingZeros) Read(p []byte) (int, error) {
-	if z.left <= 0 {
-		return 0, io.EOF
-	}
-	k := min(int64(len(p)), z.left, 64<<10)
-	clear(p[:k])
-	z.left -= k
-	z.n.Add(k)
-	return int(k), nil
 }

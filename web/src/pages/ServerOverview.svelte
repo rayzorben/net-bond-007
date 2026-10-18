@@ -31,6 +31,12 @@
     store.toast(`${name} disconnected`)
   }
   const host = location.hostname
+  const speed = $derived(st.speedTest)
+  const ago = (t: string) => duration((Date.now() - new Date(t).getTime()) / 1000)
+  async function testNow() {
+    await api('POST', '/api/x/speedtest')
+    store.toast('Server speed test started')
+  }
 </script>
 
 {#each st.warnings as w}
@@ -47,6 +53,15 @@
   </StatCard>
   <StatCard title="Internet connections" value={count((st.egress.tcpActive ?? 0) + (st.egress.udpActive ?? 0))}
     sub={`${count(st.egress.tcpActive ?? 0)} TCP · ${count(st.egress.udpActive ?? 0)} UDP · ${count(st.egress.blocked ?? 0)} blocked · ${bytes((st.egress.bytesDown ?? 0) + (st.egress.bytesUp ?? 0))} total`} />
+  {#if speed?.enabled}
+    <StatCard title="Server internet"
+      value={speed.last && !speed.last.error ? count(Math.round(speed.last.downMbps)) : '—'} unit={speed.last && !speed.last.error ? 'Mbit/s down' : ''}
+      sub={speed.running ? 'testing…' : speed.last?.error ? `test failed: ${speed.last.error}` : speed.last
+        ? `${count(Math.round(speed.last.upMbps))} up · ping ${speed.last.pingMs.toFixed(0)} ms · ${ago(speed.last.at)} ago${speed.last.limited ? ' · LIMITED' : ''}`
+        : 'first test soon'}>
+      <button class="btn sm" disabled={speed.running} onclick={testNow}>Test now</button>
+    </StatCard>
+  {/if}
 </section>
 
 <section class="card chart">
