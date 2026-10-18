@@ -31,8 +31,7 @@ export function toLanes(links: LinkView[], keyOf: (l: LinkView) => string, opts:
     const { dupShare, active } = recentDupShare(key, l)
     let role: LaneRole = ''
     if (live(l)) {
-      if (opts.directVia && l.name === opts.directVia) role = 'direct'
-      else if (!active && l.winShare < 0.01) role = 'idle'
+      if (!active && l.winShare < 0.01) role = 'idle'
       else role = dupShare >= 0.5 ? 'redundancy' : 'speed'
     }
     return {
@@ -41,6 +40,7 @@ export function toLanes(links: LinkView[], keyOf: (l: LinkView) => string, opts:
       up: opts.flip ? l.rxBps : l.txBps, down: opts.flip ? l.txBps : l.rxBps,
       winRatio: l.wins + l.dups ? l.wins / (l.wins + l.dups) : 0,
       winShare: l.winShare ?? 0, dupShare, quality: l.quality ?? 0, winner: l === winner, role,
+      direct: !!opts.directVia && l.name === opts.directVia,
     }
   })
 }

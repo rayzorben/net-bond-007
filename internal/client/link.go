@@ -144,9 +144,9 @@ func (l *clink) reader() {
 			l.link.SetPeerFECRecovered(a.FECRecovered)
 			l.mu.Unlock()
 			if ok {
-				var srtt time.Duration
-				l.link.Health(func(h *bond.Health) { h.RTT.Update(rtt); srtt = h.RTT.SRTT })
-				l.link.SetOneWayDelay(srtt / 2)
+				var owd time.Duration
+				l.link.Health(func(h *bond.Health) { h.RTT.Update(rtt); owd = h.RTT.OneWay() })
+				l.link.SetOneWayDelay(owd)
 			}
 		case proto.TypeHelloAck:
 			var a proto.HelloAck
@@ -261,10 +261,11 @@ func (l *clink) evaluate(now time.Time) {
 	l.lastAckSeen = l.probes.LastAck
 	l.mu.Unlock()
 
-	var srtt, recent, minRTT time.Duration
+	var srtt, recent, minRTT, effRTT time.Duration
 	l.link.Health(func(h *bond.Health) {
 		h.Loss = loss
 		srtt, minRTT = h.RTT.SRTT, h.RTT.Min
+		effRTT = 2 * h.RTT.OneWay()
 		recent = (h.RTT.SRTT + h.RTT.Last) / 2 // react faster than SRTT alone
 	})
 	testing := l.testing.Load()
@@ -278,7 +279,9 @@ func (l *clink) evaluate(now time.Time) {
 		DegradedLoss: cfg.DegradedLossPct / 100,
 		DownLoss:     cfg.DownLossPct / 100,
 		DownAfter:    time.Duration(cfg.DownAfterMs) * time.Millisecond,
-	}, everAcked && l.helloAcked.Load(), now.Sub(last), srtt, loss)
+		// Damped RTT: our own traffic bloating the queue must not mark the
+		// link degraded and push everything onto another link.
+	}, everAcked && l.helloAcked.Load(), now.Sub(last), effRTT, loss)
 	if prev := l.link.State(); testing && st == bond.StateDegraded && prev == bond.StateUp {
 		st = prev // a saturated link during a speed test isn't degraded
 	}

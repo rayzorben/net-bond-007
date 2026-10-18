@@ -106,3 +106,31 @@ func TestQualityOrdering(t *testing.T) {
 		t.Fatal("out of range")
 	}
 }
+
+func TestOneWayDampsQueueing(t *testing.T) {
+	var r RTT
+	for i := 0; i < 20; i++ {
+		r.Update(60 * time.Millisecond) // idle Starlink
+	}
+	for i := 0; i < 40; i++ {
+		r.Update(260 * time.Millisecond) // same link under load: bufferbloat
+	}
+	// SRTT/2 would be ~130 ms, slower than a 200 ms-RTT Wi-Fi link's 100 ms,
+	// so every packet would jump links. Base 60 + a quarter of the 200 ms
+	// queueing keeps it at ~55 ms.
+	if got := r.OneWay(); got < 50*time.Millisecond || got > 60*time.Millisecond {
+		t.Fatalf("OneWay = %v, want ~55ms", got)
+	}
+}
+
+func TestBaseFollowsRouteChange(t *testing.T) {
+	var r RTT
+	r.Update(40 * time.Millisecond)
+	r.baseAt = r.baseAt.Add(-3 * baseWindow) // age out both buckets
+	r.ObserveBase(90 * time.Millisecond)
+	r.baseAt = r.baseAt.Add(-3 * baseWindow)
+	r.ObserveBase(90 * time.Millisecond)
+	if r.Base != 90*time.Millisecond {
+		t.Fatalf("Base = %v, want 90ms after the old minimum aged out", r.Base)
+	}
+}

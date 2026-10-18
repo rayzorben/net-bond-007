@@ -10,8 +10,9 @@
     quality: number  // 0..100
     winner: boolean  // the single lane delivering the most packets first right now
     role: LaneRole
+    direct?: boolean // also carries the LAN's new connections outside the bond
   }
-  export type LaneRole = 'speed' | 'redundancy' | 'direct' | 'idle' | ''
+  export type LaneRole = 'speed' | 'redundancy' | 'idle' | ''
   /** Traffic going straight out a local link instead of through the bond. */
   export interface Direct { via: string; kind: string; why: string }
 </script>
@@ -29,7 +30,6 @@
   const roleText: Record<string, string> = {
     speed: 'Carrying unique traffic: adds speed',
     redundancy: 'Mostly sending spare copies that lose the race: adds redundancy',
-    direct: 'Carrying new connections straight to the internet, bypassing the bond',
     idle: 'No traffic right now',
   }
   const healthTone = (q: number) => (q >= 80 ? 'ok' : q >= 50 ? 'warn' : 'bad')
@@ -338,8 +338,13 @@
         <span class="st num up">↑ {bps(ln.up)}</span>
         {#if ln.role && !ln.backup && !ln.benched}
           <span class="role {ln.role}" title={roleText[ln.role]}>
-            {#if ln.role === 'speed'}<Zap size={11} />{:else if ln.role === 'redundancy'}<ShieldCheck size={11} />{:else if ln.role === 'direct'}<Route size={11} />{:else}<Moon size={11} />{/if}
+            {#if ln.role === 'speed'}<Zap size={11} />{:else if ln.role === 'redundancy'}<ShieldCheck size={11} />{:else}<Moon size={11} />{/if}
             {ln.role}
+          </span>
+        {/if}
+        {#if ln.direct}
+          <span class="role direct" title="Two jobs at once. Inside the bond, {displayName(ln)} is {ln.role === 'redundancy' ? 'sending spare copies (redundancy)' : ln.role === 'idle' ? 'idle' : 'carrying unique traffic (speed)'} for connections that were already on the bond. Outside it, {displayName(ln)} also carries the LAN's new connections straight to the internet (the dashed arc).">
+            <Route size={11} />+ direct
           </span>
         {/if}
         {#if ln.winner}<span class="crown" title="Delivering the most packets first right now ({Math.round(ln.winShare * 100)}%)">★</span>{/if}

@@ -17,6 +17,26 @@ type RTT struct {
 	Min     time.Duration
 	Last    time.Duration
 	Samples uint64
+	// Base is the minimum RTT over the last baseWindow..2*baseWindow: the
+	// path's current propagation delay without load-induced queueing.
+	// Unlike Min it follows route changes (e.g. a Starlink handover).
+	Base     time.Duration
+	baseNext time.Duration
+	baseAt   time.Time
+}
+
+const baseWindow = 10 * time.Second
+
+// OneWay estimates the one-way delay for scheduling: half the base RTT plus a
+// quarter of the queueing on top of it. Using the full smoothed RTT made the
+// scheduler chase its own load: the busy link's RTT bloated, every packet
+// moved to the other link, which then bloated, and traffic ping-ponged.
+func (r *RTT) OneWay() time.Duration {
+	base := r.Base
+	if base <= 0 || base > r.SRTT {
+		base = r.SRTT
+	}
+	return (base + (r.SRTT-base)/4) / 2
 }
 
 func (r *RTT) Update(sample time.Duration) {
@@ -25,6 +45,7 @@ func (r *RTT) Update(sample time.Duration) {
 	}
 	r.Last = sample
 	r.Samples++
+	r.ObserveBase(sample)
 	if r.Samples == 1 {
 		r.SRTT = sample
 		r.RTTVar = sample / 2
@@ -40,6 +61,27 @@ func (r *RTT) Update(sample time.Duration) {
 	}
 	r.RTTVar = (3*r.RTTVar + diff) / 4
 	r.SRTT = (7*r.SRTT + sample) / 8
+}
+
+// ObserveBase feeds the windowed minimum (two buckets of baseWindow) without
+// touching the smoothed estimate. The server uses it for RTTs the client reports.
+func (r *RTT) ObserveBase(sample time.Duration) {
+	if sample <= 0 {
+		return
+	}
+	now := time.Now()
+	if r.baseAt.IsZero() || now.Sub(r.baseAt) >= baseWindow {
+		r.Base, r.baseNext, r.baseAt = r.baseNext, sample, now
+		if r.Base <= 0 {
+			r.Base = sample
+		}
+	}
+	if sample < r.baseNext {
+		r.baseNext = sample
+	}
+	if sample < r.Base {
+		r.Base = sample
+	}
 }
 
 // ProbeTracker remembers recently sent probes to compute RTT and loss.

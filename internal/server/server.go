@@ -492,7 +492,7 @@ func (s *Server) toClient(dst netip.Addr, pkt []byte) {
 func (s *Server) applyProbe(l *bond.Link, p proto.Probe) {
 	l.SetState(bond.State(p.State & proto.ProbeStateMask))
 	l.SetBackup(p.State&proto.ProbeBackupBit != 0)
-	var srtt, minRTT time.Duration
+	var srtt, minRTT, owd time.Duration
 	var loss float64
 	last := time.Duration(p.LastRTTMicr) * time.Microsecond
 	l.Health(func(h *bond.Health) {
@@ -513,6 +513,9 @@ func (s *Server) applyProbe(l *bond.Link, p proto.Probe) {
 		if last > 0 && last < h.RTT.Min {
 			h.RTT.Min = last
 		}
+		h.RTT.ObserveBase(last)
+		h.RTT.ObserveBase(rtt)
+		owd = h.RTT.OneWay()
 		srtt, minRTT, loss = h.RTT.SRTT, h.RTT.Min, h.Loss
 	})
 	recent := srtt
@@ -525,7 +528,7 @@ func (s *Server) applyProbe(l *bond.Link, p proto.Probe) {
 	l.Shaper.SetHint(float64(p.CapKbps)*1000, max(minRTT, srtt/2))
 	l.Shaper.Observe(time.Now(), float64(p.RxKbps)*1000)
 	l.SetPeerFECRecovered(p.FECRecovered)
-	l.SetOneWayDelay(srtt / 2)
+	l.SetOneWayDelay(owd)
 }
 
 func (s *Server) applyPolicy(ss *Session) {
