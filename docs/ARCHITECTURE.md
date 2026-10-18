@@ -58,7 +58,19 @@ The inner TCP connections from the server's userspace stack (gVisor, CUBIC) cros
 
 **Switches.** Each mechanism has its own `bonding` setting, so it can be compared against the bond without it: `fec`, `repairPriority`, `stormRepair` and `outageReports` (all on by default), and `lossTolerantTCP` (experimental, off by default). The client pushes them to the server in POLICY. Older clients don't send them, and the server then leaves those features off.
 
-**Loss-tolerant TCP (experimental).** The server's userspace TCP can use `bbr`, a simplified window-based BBR patched into a trimmed copy of gVisor (`third_party/gvisor`, see its PATCHES.md). Status on 2026-10-17: it hasn't yet beaten CUBIC in the lab. Some runs collapsed to a few Mbit/s, so it stays off.
+**Loss-tolerant TCP (experimental).** The server's userspace TCP can use `bbr`, a simplified window-based BBR patched into a trimmed copy of gVisor (`third_party/gvisor`, see its PATCHES.md). It has ProbeRTT (every 10 s, 4 packets for 200 ms after the queue drains), a startup that ends once RTT doubles, rate samples over the longer of the send and ACK intervals (so bunched ACKs don't inflate them), and a floor on ssthresh after loss or RTO.
+
+Lab results, eth1 only, 40 Mbit/76 ms, median of 5 runs, in Mbit/s:
+
+| Profile | CUBIC | bbr |
+|---|---|---|
+| 3% random loss | 11.4 | 22.9 |
+| Bursty loss (Gilbert-Elliott, ~4%) | 8.7 | 12.3 |
+| 0.2% / 1% loss | 33.0 / 26.4 | 32.0 / 26.0 |
+| Starlink-like profile (150-packet buffer) | 27.2 | 25.6 |
+| Clean link | 35.4 | 34.5 |
+
+It wins under heavy or bursty loss and ties otherwise (ARQ and FEC already hide light loss), with a ~2.5% cost on a clean link. It stays off by default until it is field-tested.
 
 ## Health and failover
 

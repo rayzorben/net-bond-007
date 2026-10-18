@@ -19,7 +19,10 @@ To refresh from a new upstream version:
 1. **`pkg/tcpip/transport/tcp/bbr.go`** (new) adds `bbr`, a simplified,
    window-based BBR. It keeps cwnd at 3x the bandwidth-delay product
    (windowed max delivery rate x windowed min RTT) and doesn't cut it on
-   loss. The tests are in `bbr_test.go`.
+   loss. It has ProbeRTT (drain to 4 packets for 200 ms every 10 s), ends
+   startup once RTT doubles, takes rate samples over max(send, ack) interval,
+   and floors ssthresh after a loss or RTO. The tests are in `bbr_test.go`
+   (window convergence, bounded queue, ACK compression, RTO recovery).
    - `protocol.go`: registers `ccBBR = "bbr"` in `availableCongestionControl`.
    - `snd.go`: `initCongestionControl` handles `ccBBR`. The RFC 5681 idle
      restart (cwnd back to IW after idle > RTO) is skipped for `bbr`.

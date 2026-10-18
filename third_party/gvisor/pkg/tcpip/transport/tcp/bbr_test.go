@@ -25,6 +25,7 @@ type bbrSim struct {
 func newBBRSim(rate float64, rtt time.Duration) *bbrSim {
 	s := &sender{}
 	s.SndCwnd, s.Ssthresh = InitialCwnd, InitialSsthresh
+	s.MaxPayloadSize = 1 // the simulation counts sequence space in packets
 	s.SndUna, s.SndNxt = seqnum.Value(1), seqnum.Value(1)
 	return &bbrSim{s: s, b: newBBRCC(s), rate: rate, rtt: rtt}
 }
@@ -137,5 +138,85 @@ func TestBBRIgnoresAckCompression(t *testing.T) {
 	m.b.Update(1, 80*time.Millisecond, m.now)
 	if bw := m.b.maxBW(); bw > base*1.5 {
 		t.Fatalf("bunched ACKs inflated the rate %.0f -> %.0f packets/s", base, bw)
+	}
+}
+
+// queueSim: a bottleneck serving rate packets/s with an unbounded queue in
+// front, base RTT rtt. Packets wait in the queue, so a window larger than the
+// BDP shows up as RTT growth: the case where cwnd once ran away.
+type queueSim struct {
+	s      *sender
+	b      *bbrState
+	now    tcpip.MonotonicTime
+	rate   float64
+	rtt    time.Duration
+	queue  []tcpip.MonotonicTime // send time of each queued packet
+	acks   []qAck                // served packets, acked at .at
+	credit float64
+	maxRTT time.Duration
+}
+
+type qAck struct {
+	at, sent tcpip.MonotonicTime
+}
+
+func newQueueSim(rate float64, rtt time.Duration) *queueSim {
+	s := &sender{MaxPayloadSize: 1}
+	s.SndCwnd, s.Ssthresh = InitialCwnd, InitialSsthresh
+	s.SndUna, s.SndNxt = 1, 1
+	return &queueSim{s: s, b: newBBRCC(s), rate: rate, rtt: rtt}
+}
+
+func (q *queueSim) tick() {
+	const dt = time.Millisecond
+	q.now = q.now.Add(dt)
+	inflight := int(q.s.SndUna.Size(q.s.SndNxt))
+	for ; inflight < q.s.SndCwnd; inflight++ {
+		q.queue = append(q.queue, q.now)
+		q.s.SndNxt++
+	}
+	q.credit += q.rate * dt.Seconds()
+	for q.credit >= 1 && len(q.queue) > 0 {
+		q.acks = append(q.acks, qAck{at: q.now.Add(q.rtt), sent: q.queue[0]})
+		q.queue = q.queue[1:]
+		q.credit--
+	}
+	q.credit = min(q.credit, 1)
+	n := 0
+	var last qAck
+	for n < len(q.acks) && q.acks[n].at.Sub(q.now) <= 0 {
+		last = q.acks[n]
+		n++
+	}
+	if n > 0 {
+		q.acks = q.acks[n:]
+		q.s.SndUna = q.s.SndUna.Add(seqnum.Size(n))
+		r := q.now.Sub(last.sent)
+		q.maxRTT = max(q.maxRTT, r)
+		q.b.Update(n, r, q.now)
+	}
+}
+
+func TestBBRBoundsQueueAndProbesRTT(t *testing.T) {
+	q := newQueueSim(3500, 80*time.Millisecond)
+	for i := 0; i < 30000; i++ { // 30 s: several ProbeRTT periods
+		q.tick()
+		if i == 5000 {
+			q.maxRTT = 0 // judge the steady state, not startup's overshoot
+		}
+	}
+	bdp := 3500 * 0.08
+	if c := float64(q.s.SndCwnd); c > 3.5*bdp {
+		t.Fatalf("cwnd ran away: %.0f packets for a BDP of %.0f", c, bdp)
+	}
+	// cwnd 3 x BDP queues 2 BDPs: RTT stays near 3 x base, never grows on.
+	if q.maxRTT > 300*time.Millisecond {
+		t.Fatalf("RTT grew to %v on an 80 ms path", q.maxRTT)
+	}
+	if q.b.minRTT > 90*time.Millisecond {
+		t.Fatalf("min RTT drifted to %v (base 80 ms): ProbeRTT not refreshing it", q.b.minRTT)
+	}
+	if bw := q.b.maxBW(); bw < 3000 || bw > 4000 {
+		t.Fatalf("measured %.0f packets/s, bottleneck serves 3500", bw)
 	}
 }
