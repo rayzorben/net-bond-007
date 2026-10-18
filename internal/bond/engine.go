@@ -67,6 +67,9 @@ type Engine struct {
 
 	flows flowTable // per-connection tracking; see flows.go
 
+	// Feature switches (settings pushed by the client); see Features.
+	feat featureFlags
+
 	// Forward error correction; see fec.go.
 	fecOn                atomic.Bool
 	fecRx                fecStore
@@ -93,12 +96,38 @@ func New(session uint32, deliver func([]byte)) *Engine {
 	e.ordered.Store(&[]*Link{})
 	e.SetPolicy(sched.Policy{Mode: sched.ModeSmart, Redundancy: 2})
 	e.queueCap.Store(1024)
+	e.SetFeatures(DefaultFeatures)
 	e.history.Store(300)
 	e.rtimer = time.AfterFunc(time.Hour, e.expire)
 	e.rtimer.Stop()
 	e.closed = make(chan struct{})
 	go e.nackLoop()
 	return e
+}
+
+// Features switches individual loss-handling mechanisms on or off, so each
+// can be compared against the bond without it.
+type Features struct {
+	RepairPriority bool // repairs go ahead of queued data (link.go)
+	StormRepair    bool // repairs avoid a link in a loss storm (arq.go)
+	OutageReports  bool // QUIET: report and react to a busy link going silent (quiet.go)
+}
+
+// DefaultFeatures has everything on.
+var DefaultFeatures = Features{RepairPriority: true, StormRepair: true, OutageReports: true}
+
+type featureFlags struct {
+	repairPrio, stormRepair, quiet atomic.Bool
+}
+
+func (e *Engine) SetFeatures(f Features) {
+	e.feat.repairPrio.Store(f.RepairPriority)
+	e.feat.stormRepair.Store(f.StormRepair)
+	e.feat.quiet.Store(f.OutageReports)
+}
+
+func (e *Engine) Features() Features {
+	return Features{RepairPriority: e.feat.repairPrio.Load(), StormRepair: e.feat.stormRepair.Load(), OutageReports: e.feat.quiet.Load()}
 }
 
 // SetARQ turns in-tunnel retransmission on or off.
@@ -147,6 +176,7 @@ func (e *Engine) AddLink(id uint8, name, kind string, send func([]byte) error) *
 	}
 	l := newLink(id, name, kind, int(e.queueCap.Load()), send, &e.pool, int(e.history.Load()))
 	l.session = e.Session
+	l.feat = &e.feat
 	e.links[id] = l
 	e.publish()
 	return l

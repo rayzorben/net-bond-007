@@ -74,6 +74,25 @@ type Gateway struct {
 	perIP   map[netip.Addr]int
 	MaxPer  atomic.Int64
 	eps     sync.Map // tcpip.Endpoint -> struct{}: live inner TCP connections
+	// Clients whose inner TCP uses the loss-tolerant congestion control
+	// (netip.Addr -> struct{}); everyone else gets CUBIC.
+	lossTolerant sync.Map
+}
+
+// SetLossTolerant chooses the congestion control for a client's new inner
+// TCP connections: the patched-in "bbr" (loss-tolerant, see
+// third_party/gvisor/PATCHES.md) or the stack default, CUBIC.
+func (g *Gateway) SetLossTolerant(client netip.Addr, on bool) {
+	if on {
+		g.lossTolerant.Store(client, struct{}{})
+	} else {
+		g.lossTolerant.Delete(client)
+	}
+}
+
+func (g *Gateway) isLossTolerant(client netip.Addr) bool {
+	_, ok := g.lossTolerant.Load(client)
+	return ok
 }
 
 // New creates a gateway. gateway is the tunnel-side address of the server
@@ -247,6 +266,12 @@ func (g *Gateway) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 	r.Complete(false)
+	if g.isLossTolerant(src.Addr()) {
+		cc := tcpip.CongestionControlOption("bbr")
+		if err := ep.SetSockOpt(&cc); err != nil {
+			g.log.Debug("bbr unavailable", "err", err)
+		}
+	}
 	g.eps.Store(ep, struct{}{})
 	defer g.eps.Delete(ep)
 	ep.SocketOptions().SetKeepAlive(true)
@@ -372,8 +397,10 @@ func (g *Gateway) TCPInfo() []string {
 	g.eps.Range(func(k, _ any) bool {
 		var ti tcpip.TCPInfoOption
 		if err := k.(tcpip.Endpoint).GetSockOpt(&ti); err == nil {
-			out = append(out, fmt.Sprintf("state=%v cc=%v cwnd=%d ssthresh=%d rtt=%v rttvar=%v rto=%v reorder=%v sndbuf=%d",
-				ti.State, ti.CcState, ti.SndCwnd, ti.SndSsthresh, ti.RTT, ti.RTTVar, ti.RTO, ti.ReorderSeen, k.(tcpip.Endpoint).SocketOptions().GetSendBufferSize()))
+			var cc tcpip.CongestionControlOption
+			k.(tcpip.Endpoint).GetSockOpt(&cc)
+			out = append(out, fmt.Sprintf("algo=%s state=%v cc=%v cwnd=%d ssthresh=%d rtt=%v rttvar=%v rto=%v reorder=%v sndbuf=%d",
+				cc, ti.State, ti.CcState, ti.SndCwnd, ti.SndSsthresh, ti.RTT, ti.RTTVar, ti.RTO, ti.ReorderSeen, k.(tcpip.Endpoint).SocketOptions().GetSendBufferSize()))
 		}
 		return true
 	})

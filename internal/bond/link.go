@@ -80,6 +80,8 @@ type Link struct {
 	lossLost     atomic.Uint64 // packets the peer NACKed that went only on this link
 	// Recent losses on this link (sender side), to spot a loss storm.
 	storm stormMeter
+	// The engine's feature switches (nil for a bare link in tests: all on).
+	feat *featureFlags
 	// Receive-side silence watch (nackLoop only); see quiet.go.
 	rxw rxWatch
 	// The peer reported this link silent until then (unix nanos).
@@ -237,6 +239,9 @@ func (l *Link) writer() {
 // enqueueRepair queues a repair ahead of ordinary data (falling back to the
 // data queue when the priority lane is full).
 func (l *Link) enqueueRepair(f []byte) bool {
+	if l.feat != nil && !l.feat.repairPrio.Load() {
+		return l.enqueue(f)
+	}
 	select {
 	case l.prio <- f:
 		return true
@@ -247,7 +252,7 @@ func (l *Link) enqueueRepair(f []byte) bool {
 
 // RepairDelay estimates when a repair queued now would arrive.
 func (l *Link) RepairDelay(now time.Time) time.Duration {
-	if len(l.prio) >= prioCap {
+	if len(l.prio) >= prioCap || l.feat != nil && !l.feat.repairPrio.Load() {
 		return l.ArrivalDelay(now)
 	}
 	return time.Duration(l.owd.Load()) + time.Duration(len(l.prio))*300*time.Microsecond

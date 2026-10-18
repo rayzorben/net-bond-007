@@ -56,6 +56,10 @@ The inner TCP connections from the server's userspace stack (gVisor, CUBIC) cros
   - Sizing is per link and automatic. It counts isolated losses only: NACKed single packets, plus the peer's FEC rebuilds, which come back in a trailing PROBE/PROBE_ACK field so FEC doesn't switch itself off by hiding the loss. FEC turns on at 0.05% loss with *k* = 0.08/loss, clamped to 8..32 (about 3% overhead at 0.2% loss, 12.5% at 1% or more). It turns off after 30 s below 0.02%. Clean links carry no parity. Bursts (a buffer overflowing) are not counted: one parity can't rebuild them.
   - Compatibility: HELLO/HELLO_ACK carry `fec`, and the client asks for downstream FEC in POLICY. Peers that don't advertise it never receive FEC frames, and older peers ignore unknown frame types anyway.
 
+**Switches.** Each mechanism has its own `bonding` setting, so it can be compared against the bond without it: `fec`, `repairPriority`, `stormRepair` and `outageReports` (all on by default), and `lossTolerantTCP` (experimental, off by default). The client pushes them to the server in POLICY. Older clients don't send them, and the server then leaves those features off.
+
+**Loss-tolerant TCP (experimental).** The server's userspace TCP can use `bbr`, a simplified window-based BBR patched into a trimmed copy of gVisor (`third_party/gvisor`, see its PATCHES.md). Status on 2026-10-17: it hasn't yet beaten CUBIC in the lab. Some runs collapsed to a few Mbit/s, so it stays off.
+
 ## Health and failover
 
 - Probes go out every 250 ms per link: RTT, jitter (RTTVAR) and loss over the last 40 probes. The client reports its view to the server in every probe, including the latest raw RTT and per-interval delivered rate.

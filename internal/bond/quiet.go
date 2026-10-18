@@ -43,6 +43,9 @@ type rxWatch struct {
 
 // watchSilence runs every nackLoop tick on the receiving side.
 func (e *Engine) watchSilence(now time.Time) {
+	if !e.feat.quiet.Load() {
+		return
+	}
 	nowN := now.UnixNano()
 	links := e.Links()
 	for _, l := range links {
@@ -89,7 +92,7 @@ func (e *Engine) watchSilence(now time.Time) {
 func (e *Engine) HandleQuiet(via *Link, frame []byte) {
 	via.Rx.Add(len(frame))
 	id, ms, err := proto.ParseQuiet(frame)
-	if err != nil || !e.arq.Load() {
+	if err != nil || !e.arq.Load() || !e.feat.quiet.Load() {
 		return
 	}
 	l := e.Link(id)

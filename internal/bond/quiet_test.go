@@ -155,3 +155,38 @@ func TestHandleQuietReinjectsAndAvoidsLink(t *testing.T) {
 		t.Fatalf("link not used again after the silence: %d on starlink", got)
 	}
 }
+
+// Each loss-handling feature can be switched off on its own.
+func TestFeatureSwitchesTurnMechanismsOff(t *testing.T) {
+	e := New(1, func([]byte) {})
+	defer e.Close()
+	if e.Features() != DefaultFeatures || !DefaultFeatures.RepairPriority || !DefaultFeatures.StormRepair || !DefaultFeatures.OutageReports {
+		t.Fatalf("defaults: %+v", e.Features())
+	}
+	var aLog, bLog frameLog
+	a := e.AddLink(1, "starlink", "sim", aLog.send)
+	b := e.AddLink(2, "phone", "sim", bLog.send)
+	a.SetState(StateUp)
+	b.SetState(StateUp)
+	e.SetFeatures(Features{})
+	nowN := time.Now().UnixNano()
+	for i := stormLosses; i > 0; i-- {
+		a.storm.loss(nowN - int64(i)*int64(time.Millisecond))
+	}
+	if a.Storming(nowN) {
+		t.Fatal("storm-aware repair off, but the link reads as storming")
+	}
+	a.prio <- []byte{0} // a repair waiting in the priority lane
+	if d := a.RepairDelay(time.Now()); d != a.ArrivalDelay(time.Now()) {
+		t.Fatal("repair priority off, but RepairDelay still uses the priority lane")
+	}
+	e.SetARQ(true)
+	e.HandleQuiet(b, proto.AppendQuiet(nil, 1, b.ID, a.ID, 100))
+	if e.QuietsRecv.Load() != 0 || a.PeerQuiet(nowN) {
+		t.Fatal("outage reports off, but QUIET was acted on")
+	}
+	e.SetFeatures(DefaultFeatures)
+	if !a.Storming(nowN) {
+		t.Fatal("switching back on doesn't restore storm detection")
+	}
+}

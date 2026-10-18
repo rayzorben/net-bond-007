@@ -63,6 +63,10 @@ type Bonding struct {
 	CopiesDownAfterSec     int     `json:"copiesDownAfterSec" label:"Reduce copies after" help:"Fewer copies only once links have stayed reliable this long (more copies apply immediately)." min:"1" max:"600" unit:"s" adv:"1"`
 	Shaping                bool    `json:"shaping" label:"Smooth bursts" help:"Send on each link at about the rate it actually delivers instead of in line-rate bursts that overflow small buffers (e.g. satellite downlinks)."`
 	FEC                    bool    `json:"fec" label:"Loss protection (FEC)" help:"On links that keep losing packets (Starlink), also send a small XOR parity packet per group so a lost packet is rebuilt at once instead of waiting a round trip for a repair, which stalls TCP. Sized automatically from measured loss: about 3% extra data at 0.2% loss; off on clean links."`
+	RepairPriority         bool    `json:"repairPriority" label:"Repairs jump the queue" help:"Send recovered packets ahead of data already waiting on a link. Behind a deep queue a repair arrives after the receiver has given up on it." adv:"1"`
+	StormRepair            bool    `json:"stormRepair" label:"Route repairs around loss storms" help:"When a link is losing many packets at once (Starlink around some satellite handovers), send repairs over another link instead of back into the storm." adv:"1"`
+	OutageReports          bool    `json:"outageReports" label:"Report outages instantly" help:"When a busy link goes silent for 50 ms while another still works, tell the other end at once so it resends what was lost there over the other link, instead of waiting for the outage to end." adv:"1"`
+	LossTolerantTCP        bool    `json:"lossTolerantTCP" label:"Loss-tolerant TCP on the server (experimental)" help:"Experimental. The server's TCP toward you keeps its window at what the path delivers instead of cutting it on every loss (BBR-style). Lossy links like Starlink otherwise hold it far below what the link can carry. Off by default until it reliably beats the standard behaviour." adv:"1"`
 	QueueDepth             int     `json:"queueDepth" label:"Per-link queue" help:"Packets buffered per link before it is considered congested." min:"16" max:"8192" unit:"packets" adv:"1"`
 	LatencyWeighting       bool    `json:"latencyWeighting" label:"Favour low latency" help:"Automatic weights consider latency as well as bandwidth." adv:"1"`
 	Pacing                 bool    `json:"pacing" label:"Adaptive link pacing" help:"Learn each link's real capacity (backs off when its latency rises or it drops packets) and never feed it more. Keeps slow links from drowning in duplicates."`
@@ -154,6 +158,8 @@ func DefaultClient() *Client {
 			Mode: "smart", Strategy: "latency", Redundancy: 2, SmallPacketMirrorBytes: 160,
 			RealtimeMirror: true, RealtimePorts: "3478-3481,50000-50059,19302-19309",
 			ReorderMode: "auto", ReorderMs: 400, Retransmit: true, Shaping: true, FEC: true,
+			RepairPriority: true, StormRepair: true, OutageReports: true,
+			// LossTolerantTCP stays off until it beats CUBIC in the lab.
 			AutoScale: true, TargetDeliveryPct: 99.5, BenchBelowPct: 60, RejoinAbovePct: 75,
 			ReliabilityFallSec: 10, ReliabilityRiseSec: 60,
 			DirectWhenSingle: true, DirectAfterSec: 60, BondAfterSec: 300, CopiesDownAfterSec: 30,

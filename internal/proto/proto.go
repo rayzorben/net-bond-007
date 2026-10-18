@@ -318,6 +318,11 @@ type Policy struct {
 	// FEC asks the server to protect downstream links with FEC frames
 	// (sized automatically from measured loss).
 	FEC bool `json:"fec,omitempty"`
+	// Feature switches for loss handling (absent from older clients: off).
+	RepairPriority  bool `json:"repairPriority,omitempty"`
+	StormRepair     bool `json:"stormRepair,omitempty"`
+	OutageReports   bool `json:"outageReports,omitempty"`
+	LossTolerantTCP bool `json:"lossTolerantTCP,omitempty"`
 	// Automatic scaling decided by the client: copies per packet and which
 	// links to stop using. Zero/empty = not active.
 	AutoCopies int     `json:"autoCopies,omitempty"`

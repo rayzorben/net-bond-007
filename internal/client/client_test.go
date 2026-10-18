@@ -50,6 +50,7 @@ func TestEstimateCapacity(t *testing.T) {
 func TestWirePolicyPopulatesEveryField(t *testing.T) {
 	cfg := config.DefaultClient()
 	cfg.Links = map[string]config.Link{"eth0": {MaxMbps: 50}}
+	cfg.Bonding.LossTolerantTCP = true // off by default; it must still reach the wire
 	c := New(config.NewMemory(cfg), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e := bond.New(1, func([]byte) {})
 	defer e.Close()

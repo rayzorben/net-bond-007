@@ -203,6 +203,11 @@ func (c *Client) applyPolicy(e *bond.Engine, cfg *config.Client) {
 	// Upstream FEC only toward a server that understands it.
 	a := c.ack.Load()
 	e.SetFEC(cfg.Bonding.FEC && a != nil && a.FEC)
+	e.SetFeatures(bond.Features{
+		RepairPriority: cfg.Bonding.RepairPriority,
+		StormRepair:    cfg.Bonding.StormRepair,
+		OutageReports:  cfg.Bonding.OutageReports,
+	})
 	ports, _ := sched.ParsePorts(cfg.Bonding.RealtimePorts)
 	mode, red := sched.Mode(cfg.Bonding.Mode), cfg.Bonding.Redundancy
 	if p := c.plan.Load(); p != nil && p.Copies > 0 {
@@ -237,6 +242,10 @@ func (c *Client) wirePolicy() proto.Policy {
 		Retransmit:             cfg.Bonding.Retransmit,
 		Shaping:                cfg.Bonding.Shaping,
 		FEC:                    cfg.Bonding.FEC,
+		RepairPriority:         cfg.Bonding.RepairPriority,
+		StormRepair:            cfg.Bonding.StormRepair,
+		OutageReports:          cfg.Bonding.OutageReports,
+		LossTolerantTCP:        cfg.Bonding.LossTolerantTCP,
 		LatencyWeighting:       cfg.Bonding.LatencyWeighting,
 		LinkMaxMbps:            caps,
 		MeteredShare:           c.meteredShares(),

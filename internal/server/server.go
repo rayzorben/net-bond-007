@@ -543,6 +543,10 @@ func (s *Server) applyPolicy(ss *Session) {
 	}
 	ss.Engine.SetARQ(p.Retransmit)
 	ss.Engine.SetFEC(p.FEC) // only FEC-capable clients ask for it
+	ss.Engine.SetFeatures(bond.Features{RepairPriority: p.RepairPriority, StormRepair: p.StormRepair, OutageReports: p.OutageReports})
+	if s.gw != nil {
+		s.gw.SetLossTolerant(ss.IP, p.LossTolerantTCP) // applies to new connections
+	}
 	red := max(p.Redundancy, 1)
 	if p.AutoCopies > 0 && mode == sched.ModeSmart {
 		// The client's automatic scaling decided the copies.
@@ -658,6 +662,9 @@ func (s *Server) tick(now time.Time) {
 		delete(s.sessions, ss.ID)
 		delete(s.byIP, ss.IP)
 		s.pool.free(ss.IP)
+		if s.gw != nil {
+			s.gw.SetLossTolerant(ss.IP, false)
+		}
 		s.mu.Unlock()
 		ss.Engine.Close()
 		s.log.Info("client session expired", "client", ss.Name, "session", fmt.Sprintf("%08x", ss.ID))

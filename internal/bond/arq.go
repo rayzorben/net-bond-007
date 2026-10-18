@@ -168,7 +168,13 @@ func (m *stormMeter) active(nowN int64) bool {
 }
 
 // Storming reports whether the link is in a loss storm (sender's view).
-func (l *Link) Storming(nowN int64) bool { return l.storm.active(nowN) }
+// With storm-aware repair switched off it always reports false.
+func (l *Link) Storming(nowN int64) bool {
+	if l.feat != nil && !l.feat.stormRepair.Load() {
+		return false
+	}
+	return l.storm.active(nowN)
+}
 
 type gap struct {
 	detected time.Time
