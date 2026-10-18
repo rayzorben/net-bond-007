@@ -64,7 +64,7 @@ export interface ServerState {
 
 export interface ServerSpeedResult {
   at: string; reason: string; downMbps: number; upMbps: number; pingMs: number
-  usedMB: number; limited: boolean; error?: string
+  usedMB: number; limited: boolean; error?: string; source?: string
 }
 
 export interface ServerSpeed {

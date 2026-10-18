@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +24,10 @@ type SpeedResult struct {
 	PingMs   float64   `json:"pingMs"`
 	UsedMB   float64   `json:"usedMB"`
 	Limited  bool      `json:"limited"`
-	Error    string    `json:"error,omitempty"`
+	// Source is where the download was measured: the test server, or a
+	// fallback file when it refused (then upload is not measured: UpMbps 0).
+	Source string `json:"source,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // SpeedView is the dashboard's view of the server speed test.
@@ -78,7 +82,7 @@ func (s *Server) RunSpeedTest(reason string) error {
 	st.mu.Unlock()
 	go func() {
 		c := s.cfg.Get().Speed
-		r := runServerSpeedTest(c.URL, time.Duration(max(c.Seconds, 3))*time.Second, float64(c.LimitedMbps))
+		r := runServerSpeedTest(c.URL, time.Duration(max(c.Seconds, 3))*time.Second, float64(c.LimitedMbps), splitURLs(c.FallbackURLs)...)
 		r.Reason = reason
 		st.mu.Lock()
 		st.running = false
@@ -102,14 +106,31 @@ func (s *Server) RunSpeedTest(reason string) error {
 	return nil
 }
 
-func runServerSpeedTest(url string, d time.Duration, limitedMbps float64) SpeedResult {
-	r := SpeedResult{At: time.Now()}
+func runServerSpeedTest(url string, d time.Duration, limitedMbps float64, fallbacks ...string) SpeedResult {
+	r := SpeedResult{At: time.Now(), Source: url}
+	newClient := func() *http.Client { return &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}} }
 	o := speedtest.Options{
-		URL: url, Duration: d, Streams: serverSpeedStreams, MaxBytes: serverSpeedMaxBytes, RequestBytes: 50_000_000, // speed.cloudflare.com refuses (403) 100 MB and up
-		NewClient: func() *http.Client { return &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}} },
+		URL: url, Duration: d, Streams: serverSpeedStreams, MaxBytes: serverSpeedMaxBytes,
+		RequestBytes: 50_000_000, // speed.cloudflare.com refuses (403) 100 MB and up
+		NewClient:    newClient,
 	}
 	r.PingMs = speedtest.Ping(speedtest.Options{URL: url, NewClient: func() *http.Client { return &http.Client{Timeout: 10 * time.Second} }})
 	down, usedD, err := speedtest.Download(o)
+	if down == 0 && speedtest.Refused(err) && len(fallbacks) > 0 {
+		// Refused (rate limit): measure download against the plain file that
+		// answers fastest. Upload isn't measured then.
+		if f, ping := fastestFile(fallbacks); f != "" {
+			fo := o
+			fo.FileURL = f
+			if fd, fu, ferr := speedtest.Download(fo); fd > 0 {
+				r.Source, r.PingMs, r.DownMbps, r.UsedMB = f, ping, fd, fu/1e6
+				r.Limited = limitedMbps > 0 && r.DownMbps < limitedMbps
+				return r
+			} else if ferr != nil {
+				err = fmt.Errorf("%v; fallback %s: %v", err, f, ferr)
+			}
+		}
+	}
 	r.DownMbps = down
 	if err != nil && down == 0 {
 		r.Error, r.UsedMB = "download: "+err.Error(), usedD/1e6
@@ -123,6 +144,28 @@ func runServerSpeedTest(url string, d time.Duration, limitedMbps float64) SpeedR
 	}
 	r.Limited = limitedMbps > 0 && (r.DownMbps < limitedMbps || r.UpMbps < limitedMbps)
 	return r
+}
+
+func splitURLs(s string) []string {
+	var out []string
+	for _, u := range strings.Split(s, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// fastestFile returns the fallback URL with the lowest time to first byte.
+func fastestFile(urls []string) (string, float64) {
+	cl := &http.Client{Timeout: 5 * time.Second}
+	best, bestPing := "", 0.0
+	for _, u := range urls {
+		if p := speedtest.FilePing(cl, u); p > 0 && (best == "" || p < bestPing) {
+			best, bestPing = u, p
+		}
+	}
+	return best, bestPing
 }
 
 func (s *Server) speedView() SpeedView {
@@ -147,6 +190,10 @@ func (s *Server) speedWarning() string {
 	if v.Last == nil || !v.Last.Limited {
 		return ""
 	}
-	return fmt.Sprintf("The server's internet tested slow: %.0f Mbit/s down, %.0f up (warning below %d). It limits every client's bond.",
-		v.Last.DownMbps, v.Last.UpMbps, s.cfg.Get().Speed.LimitedMbps)
+	up := fmt.Sprintf("%.0f up", v.Last.UpMbps)
+	if v.Last.UpMbps == 0 {
+		up = "upload not measured"
+	}
+	return fmt.Sprintf("The server's internet tested slow: %.0f Mbit/s down, %s (warning below %d). It limits every client's bond.",
+		v.Last.DownMbps, up, s.cfg.Get().Speed.LimitedMbps)
 }

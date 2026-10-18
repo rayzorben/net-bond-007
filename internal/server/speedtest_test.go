@@ -75,3 +75,22 @@ func TestServerSpeedTestRunsInBackgroundAndWarns(t *testing.T) {
 		t.Fatalf("no dashboard warning for a limited server: %q", w)
 	}
 }
+
+// When the test server refuses (rate limit), download is measured against
+// the fallback file instead, and upload is reported as not measured.
+func TestServerSpeedTestFallsBackWhenRefused(t *testing.T) {
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("bytes") == "0" {
+			return // pings still answer
+		}
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer refusing.Close()
+	files := fakeSpeedServer()
+	defer files.Close()
+	file := files.URL + "/__down?bytes=500000000" // stands in for a plain big file
+	r := runServerSpeedTest(refusing.URL, 2*time.Second, 1, "http://127.0.0.1:1/none.bin", file)
+	if r.Error != "" || r.DownMbps <= 0 || r.UpMbps != 0 || r.Source != file {
+		t.Fatalf("fallback: %+v", r)
+	}
+}

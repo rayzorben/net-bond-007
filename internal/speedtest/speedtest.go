@@ -27,6 +27,9 @@ type Options struct {
 	// (default 25 MB). Fast hosts use bigger ones: fewer requests, so the
 	// endpoint's rate limit is not hit.
 	RequestBytes int64
+	// FileURL, if set, makes Download fetch this plain file (read until the
+	// time or data cap) instead of the /__down endpoint.
+	FileURL string
 	// NewClient returns an HTTP client for one stream (and for pings).
 	NewClient func() *http.Client
 }
@@ -47,6 +50,38 @@ var errStop = errors.New("stop")
 type statusError struct{ status string }
 
 func (e statusError) Error() string { return e.status }
+
+// Refused reports whether err is the endpoint refusing the test (rate limit
+// or request too large) rather than the network failing.
+func Refused(err error) bool {
+	var se statusError
+	return errors.As(err, &se) && (strings.HasPrefix(se.status, "429") || strings.HasPrefix(se.status, "403"))
+}
+
+// FilePing returns the time to fetch the first byte of a plain file URL in
+// milliseconds (median of 3), or 0 if it failed.
+func FilePing(cl *http.Client, url string) float64 {
+	var pings []float64
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Range", "bytes=0-0")
+		start := time.Now()
+		resp, err := cl.Do(req)
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode < 400 && i > 0 {
+			pings = append(pings, float64(time.Since(start))/float64(time.Millisecond))
+		}
+	}
+	if len(pings) == 0 {
+		return 0
+	}
+	sort.Float64s(pings)
+	return pings[len(pings)/2]
+}
 
 // Ping returns the median time of a few empty requests in milliseconds
 // (the first, which includes the TCP and TLS handshakes, is not counted),
@@ -77,7 +112,11 @@ func Ping(o Options) float64 {
 // Download measures download bandwidth in Mbit/s and returns the bytes moved.
 func Download(o Options) (mbps, total float64, err error) {
 	return measure(o, func(ctx context.Context, cl *http.Client, n *atomic.Int64) error {
-		req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/__down?bytes=%d", o.base(), o.reqBytes()), nil)
+		u := fmt.Sprintf("%s/__down?bytes=%d", o.base(), o.reqBytes())
+		if o.FileURL != "" {
+			u = o.FileURL
+		}
+		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 		resp, err := cl.Do(req)
 		if err != nil {
 			return err

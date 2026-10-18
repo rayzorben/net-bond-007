@@ -318,6 +318,7 @@ type ServerSpeed struct {
 	Seconds       int    `json:"seconds" label:"Test length" help:"Per direction." min:"3" max:"30" unit:"s" adv:"1"`
 	LimitedMbps   int    `json:"limitedMbps" label:"Warn below" help:"Report the server's internet as limited when download or upload tests slower than this." min:"1" max:"100000" unit:"Mbit/s"`
 	URL           string `json:"url" label:"Test server" help:"A Cloudflare-style speed test endpoint (GET /__down?bytes=N, POST /__up)." adv:"1"`
+	FallbackURLs  string `json:"fallbackUrls" label:"Fallback test files" help:"Comma-separated large files to measure download with when the test server refuses (Cloudflare rate-limits busy datacenter addresses). The one answering fastest is used." adv:"1"`
 }
 
 type ServerHistory struct {
@@ -352,9 +353,10 @@ func DefaultServer() *Server {
 			DefaultQueue: 1024, TrustClientRate: true,
 		},
 		History: ServerHistory{Enabled: true, RetentionDays: 14, SampleSec: 10},
-		Speed:   ServerSpeed{Enabled: true, IntervalHours: 6, Seconds: 6, LimitedMbps: 200, URL: "https://speed.cloudflare.com"},
-		UI:      UI{Listen: ":8080", RefreshMs: 500},
-		Log:     Log{Level: "info"},
+		Speed: ServerSpeed{Enabled: true, IntervalHours: 6, Seconds: 6, LimitedMbps: 200, URL: "https://speed.cloudflare.com",
+			FallbackURLs: "https://ash-speed.hetzner.com/1GB.bin,https://hil-speed.hetzner.com/1GB.bin,https://fsn1-speed.hetzner.com/1GB.bin,https://hel1-speed.hetzner.com/1GB.bin,https://sin-speed.hetzner.com/1GB.bin"},
+		UI:  UI{Listen: ":8080", RefreshMs: 500},
+		Log: Log{Level: "info"},
 	}
 }
 

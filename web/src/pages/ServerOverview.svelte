@@ -57,7 +57,7 @@
     <StatCard title="Server internet"
       value={speed.last && !speed.last.error ? count(Math.round(speed.last.downMbps)) : '—'} unit={speed.last && !speed.last.error ? 'Mbit/s down' : ''}
       sub={speed.running ? 'testing…' : speed.last?.error ? `test failed: ${speed.last.error}` : speed.last
-        ? `${count(Math.round(speed.last.upMbps))} up · ping ${speed.last.pingMs.toFixed(0)} ms · ${ago(speed.last.at)} ago${speed.last.limited ? ' · LIMITED' : ''}`
+        ? `${speed.last.upMbps ? `${count(Math.round(speed.last.upMbps))} up` : 'upload not measured'} · ping ${speed.last.pingMs.toFixed(0)} ms · ${ago(speed.last.at)} ago${speed.last.limited ? ' · LIMITED' : ''}`
         : 'first test soon'}>
       <button class="btn sm" disabled={speed.running} onclick={testNow}>Test now</button>
     </StatCard>
