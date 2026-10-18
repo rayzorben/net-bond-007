@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -117,18 +118,20 @@ func runServerSpeedTest(url string, d time.Duration, limitedMbps float64, fallba
 	r.PingMs = speedtest.Ping(speedtest.Options{URL: url, NewClient: func() *http.Client { return &http.Client{Timeout: 10 * time.Second} }})
 	down, usedD, err := speedtest.Download(o)
 	if down == 0 && speedtest.Refused(err) && len(fallbacks) > 0 {
-		// Refused (rate limit): measure download against the plain file that
-		// answers fastest. Upload isn't measured then.
-		if f, ping := fastestFile(fallbacks); f != "" {
+		// Refused (rate limit): measure download against plain files, the
+		// fastest-answering first. One stream: file hosts limit parallel
+		// downloads per address (Hetzner refuses a third), and one stream is
+		// enough for gigabits. Upload isn't measured then.
+		for _, f := range filesByPing(fallbacks) {
 			fo := o
-			fo.FileURL = f
-			if fd, fu, ferr := speedtest.Download(fo); fd > 0 {
-				r.Source, r.PingMs, r.DownMbps, r.UsedMB = f, ping, fd, fu/1e6
+			fo.FileURL, fo.Streams = f.url, 1
+			fd, fu, ferr := speedtest.Download(fo)
+			if fd > 0 {
+				r.Source, r.PingMs, r.DownMbps, r.UsedMB = f.url, f.ping, fd, fu/1e6
 				r.Limited = limitedMbps > 0 && r.DownMbps < limitedMbps
 				return r
-			} else if ferr != nil {
-				err = fmt.Errorf("%v; fallback %s: %v", err, f, ferr)
 			}
+			err = fmt.Errorf("%v; fallback %s: %v", err, f.url, ferr)
 		}
 	}
 	r.DownMbps = down
@@ -156,16 +159,22 @@ func splitURLs(s string) []string {
 	return out
 }
 
-// fastestFile returns the fallback URL with the lowest time to first byte.
-func fastestFile(urls []string) (string, float64) {
+type fileCandidate struct {
+	url  string
+	ping float64
+}
+
+// filesByPing returns the fallback files that answer, fastest first.
+func filesByPing(urls []string) []fileCandidate {
 	cl := &http.Client{Timeout: 5 * time.Second}
-	best, bestPing := "", 0.0
+	var out []fileCandidate
 	for _, u := range urls {
-		if p := speedtest.FilePing(cl, u); p > 0 && (best == "" || p < bestPing) {
-			best, bestPing = u, p
+		if p := speedtest.FilePing(cl, u); p > 0 {
+			out = append(out, fileCandidate{u, p})
 		}
 	}
-	return best, bestPing
+	sort.Slice(out, func(i, j int) bool { return out[i].ping < out[j].ping })
+	return out
 }
 
 func (s *Server) speedView() SpeedView {
