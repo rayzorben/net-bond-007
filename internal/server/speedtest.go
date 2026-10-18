@@ -105,7 +105,7 @@ func (s *Server) RunSpeedTest(reason string) error {
 func runServerSpeedTest(url string, d time.Duration, limitedMbps float64) SpeedResult {
 	r := SpeedResult{At: time.Now()}
 	o := speedtest.Options{
-		URL: url, Duration: d, Streams: serverSpeedStreams, MaxBytes: serverSpeedMaxBytes, RequestBytes: 100_000_000,
+		URL: url, Duration: d, Streams: serverSpeedStreams, MaxBytes: serverSpeedMaxBytes, RequestBytes: 50_000_000, // speed.cloudflare.com refuses (403) 100 MB and up
 		NewClient: func() *http.Client { return &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}} },
 	}
 	r.PingMs = speedtest.Ping(speedtest.Options{URL: url, NewClient: func() *http.Client { return &http.Client{Timeout: 10 * time.Second} }})
