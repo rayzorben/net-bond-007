@@ -4,6 +4,7 @@
   import { store, key, api } from '../lib/store.svelte'
   import { bps, bpsParts, duration, count, bytes } from '../lib/format'
   import BondMap, { type Lane } from '../components/BondMap.svelte'
+  import { toLanes } from '../lib/lanes'
   import StatCard from '../components/StatCard.svelte'
   import Sparkline from '../components/Sparkline.svelte'
   import TimeChart from '../components/TimeChart.svelte'
@@ -20,11 +21,7 @@
     for (const s of st.sessions) for (const l of s.links ?? []) if (`${s.id}/${key(l)}` === store.selected) return l
     return undefined
   })
-  const lanesFor = (s: ServerState['sessions'][number]): Lane[] => (s.links ?? []).map((l) => ({
-    key: `${s.id}/${key(l)}`, name: l.name, label: l.label, kind: l.kind, state: l.state, backup: l.backup,
-    rtt: l.rttMs, loss: l.lossPct, up: l.rxBps, down: l.txBps,
-    winRatio: l.wins + l.dups ? l.wins / (l.wins + l.dups) : 0,
-  }))
+  const lanesFor = (s: ServerState['sessions'][number]): Lane[] => toLanes(s.links ?? [], (l) => `${s.id}/${key(l)}`, { flip: true })
   async function kick(id: string, name: string) {
     if (!confirm(`Disconnect ${name}? It will reconnect automatically unless it is switched off.`)) return
     await api('POST', `/api/x/sessions/${id}/kick`)

@@ -3,7 +3,8 @@
   import type { ClientState } from '../lib/types'
   import { store, key } from '../lib/store.svelte'
   import { bps, bpsParts, ms, kindColor, kindLabel, displayName, cssColor } from '../lib/format'
-  import BondMap, { type Lane } from '../components/BondMap.svelte'
+  import BondMap, { type Lane, type Direct } from '../components/BondMap.svelte'
+  import { toLanes } from '../lib/lanes'
   import StatCard from '../components/StatCard.svelte'
   import Sparkline from '../components/Sparkline.svelte'
   import TimeChart from '../components/TimeChart.svelte'
@@ -20,11 +21,18 @@
 
   let { st }: { st: ClientState } = $props()
 
-  const lanes: Lane[] = $derived(st.links.map((l) => ({
-    key: key(l), name: l.name, label: l.label, kind: l.kind, state: l.state, backup: l.backup, benched: l.benched,
-    rtt: l.rttMs, loss: l.lossPct, up: l.txBps, down: l.rxBps,
-    winRatio: l.wins + l.dups ? l.wins / (l.wins + l.dups) : 0,
-  })))
+  // Going direct: new connections skip the bond (guard / only-reliable-link), or the server is unreachable.
+  const direct: Direct | null = $derived.by(() => {
+    const via = st.tunnel.bypass ?? (st.auto?.mode === 'direct' ? st.auto.directVia : undefined)
+    if (!via) return null
+    const kind = st.links.find((l) => l.name === via)?.kind ?? st.interfaces.find((i) => i.name === via)?.kind ?? 'other'
+    const g = st.auto?.guard
+    const why = st.tunnel.bypass ? 'Server unreachable: all traffic goes straight out'
+      : g?.active ? `The bond tested slower (${g.bondedMbps?.toFixed(0)} vs ${g.directMbps?.toFixed(0)} Mbit/s): new connections go direct, existing ones stay on the bond`
+      : 'Only one reliable link: the tunnel is bypassed'
+    return { via, kind, why }
+  })
+  const lanes: Lane[] = $derived(toLanes(st.links, key, { directVia: direct?.via }))
   const live = $derived(st.links.filter((l) => l.state === 'up' || l.state === 'degraded'))
   const best = $derived(live.length ? Math.min(...live.map((l) => l.rttMs).filter((x) => x > 0)) : 0)
   const worst = $derived(live.length ? Math.max(...live.map((l) => l.rttMs)) : 0)
@@ -109,7 +117,7 @@
     </div>
     <BondMap {lanes} leftTitle={st.name} leftSub={st.tunnel.ip ?? 'no tunnel yet'}
       rightTitle={st.server.name || st.server.address} rightSub={st.server.connected ? st.server.resolved ?? '' : 'connecting…'}
-      egress={st.engine.rxBps + st.engine.txBps} winSide="left" height={Math.max(300, Math.min(460, 140 + lanes.length * 78))}
+      egress={st.engine.rxBps + st.engine.txBps} winSide="left" {direct} height={Math.max(300, Math.min(460, 140 + lanes.length * 78))}
       onselect={(k) => (store.selected = k)} />
   </section>
 
