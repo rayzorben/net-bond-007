@@ -350,7 +350,7 @@ func DefaultServer() *Server {
 		},
 		Sessions: ServerSessions{
 			IdleTimeoutSec: 120, LinkTimeoutMs: 1200, MaxSessions: 1000, HistorySeconds: 300,
-			DefaultQueue: 1024, TrustClientRate: true,
+			DefaultQueue: 4096, TrustClientRate: true,
 		},
 		History: ServerHistory{Enabled: true, RetentionDays: 14, SampleSec: 10},
 		Speed: ServerSpeed{Enabled: true, IntervalHours: 6, Seconds: 6, LimitedMbps: 200, URL: "https://speed.cloudflare.com",

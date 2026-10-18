@@ -170,6 +170,7 @@ type EngineView struct {
 	FECBad        uint64  `json:"fecBad"`
 	QuietsSent    uint64  `json:"quietsSent"`
 	QuietsRecv    uint64  `json:"quietsRecv"`
+	QueueDrops    uint64  `json:"queueDrops"`
 }
 
 func (e *Engine) View() EngineView {
@@ -197,6 +198,7 @@ func (e *Engine) View() EngineView {
 		FECBad:        e.FECBad.Load(),
 		QuietsSent:    e.QuietsSent.Load(),
 		QuietsRecv:    e.QuietsRecv.Load(),
+		QueueDrops:    e.QueueDrops.Load(),
 		RtxPremature:  e.RtxPremature.Load(),
 		Reinjected:    e.Reinjected.Load(),
 		NacksSent:     e.NacksSent.Load(),

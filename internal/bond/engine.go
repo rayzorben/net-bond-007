@@ -47,6 +47,7 @@ type Engine struct {
 
 	UniqueTx, UniqueRx metrics.Counter
 	NoLink             atomic.Uint64 // packets dropped: no usable link
+	QueueDrops         atomic.Uint64 // dropped before sequencing: the link's queue was too deep
 	TooOld             atomic.Uint64
 	txRate, rxRate     metrics.Rate
 	TxBps, RxBps       atomic.Uint64
@@ -306,6 +307,15 @@ func (e *Engine) Send(pkt []byte) int {
 			}
 		}
 	}
+	// Congestion inside the bond: the best link's queue already holds more
+	// than maxQueueDelay. Drop before sequencing, so the receiver sees no gap
+	// and nothing is repaired: the inner TCP sees an ordinary loss and slows
+	// down. (Dropped after sequencing, ARQ would "repair" our own congestion
+	// and hide it from TCP, which then never stops growing the queue.)
+	if l := linkByID(links, ids[0]); l != nil && (l.QueueDrain(now) > maxQueueDelay || l.Congested()) {
+		e.QueueDrops.Add(1)
+		return 0
+	}
 	e.flows.note(pkt, true, ids, now)
 
 	seq := e.txSeq.Add(1)
@@ -363,6 +373,9 @@ func peerQuietPenalty(l *Link, nowN int64) time.Duration {
 	}
 	return 0
 }
+
+// maxQueueDelay bounds how long a packet may wait in a link's send queue.
+const maxQueueDelay = 300 * time.Millisecond
 
 func linkByID(links []*Link, id uint8) *Link {
 	for _, l := range links {

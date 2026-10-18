@@ -520,6 +520,9 @@ func (s *Server) applyProbe(l *bond.Link, p proto.Probe) {
 		recent = (srtt + last) / 2 // react faster than the smoothed value
 	}
 	l.Pacer.Govern(time.Now(), recent, minRTT, loss, float64(p.RxKbps)*1000)
+	// Pacing starts from the client's capacity estimate for the link (its
+	// speed tests) and times probes by the link's base round trip.
+	l.Shaper.SetHint(float64(p.CapKbps)*1000, max(minRTT, srtt/2))
 	l.Shaper.Observe(time.Now(), float64(p.RxKbps)*1000)
 	l.SetPeerFECRecovered(p.FECRecovered)
 	l.SetOneWayDelay(srtt / 2)

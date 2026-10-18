@@ -270,6 +270,7 @@ func (l *clink) evaluate(now time.Time) {
 	testing := l.testing.Load()
 	if !testing { // our own speed test fills the queue: not a signal
 		l.link.Pacer.Govern(now, recent, minRTT, loss, delivered)
+		l.link.Shaper.SetHint(0, max(minRTT, srtt/2))
 		l.link.Shaper.Observe(now, delivered)
 	}
 	st := bond.Classify(bond.HealthParams{

@@ -26,150 +26,160 @@ func drive(s *Shaper, now time.Time, d time.Duration, offeredBps float64) (time.
 	return end, released
 }
 
-func TestShaperUnlimitedUntilLearned(t *testing.T) {
+// link simulates a bottleneck of capBps fed by the shaper: each 250 ms the
+// far end reports what it received (what was sent, up to capacity; more
+// than capacity overflows a shallow buffer and loses the excess and more).
+type shapeLink struct {
+	s      *Shaper
+	now    time.Time
+	capBps float64
+	last   float64 // what the far end reports next (lags one interval)
+}
+
+func (k *shapeLink) interval(offered float64) float64 {
+	var rel float64
+	k.now, rel = drive(k.s, k.now, 250*time.Millisecond, offered)
+	sent := rel * 8 / 0.25
+	k.s.Observe(k.now, k.last)
+	k.last = min(sent, k.capBps)
+	if sent > k.capBps*1.1 {
+		k.last = k.capBps * 0.9 // shallow buffer: bursts overflow
+	}
+	return sent
+}
+
+func newShapeLink(capBps float64) *shapeLink {
+	s := &Shaper{}
+	s.Configure(true)
+	s.SetHint(0, 80*time.Millisecond)
+	return &shapeLink{s: s, now: time.Now(), capBps: capBps}
+}
+
+func TestShaperPacesFromTheFirstPacket(t *testing.T) {
 	var s Shaper
 	s.Configure(true)
-	if d := s.Delay(1<<20, time.Now()); d != 0 {
-		t.Fatalf("shaped before any delivery report: %v", d)
+	_, rel := drive(&s, time.Now(), time.Second, 500e6)
+	if got := rel * 8; got > 2*shapeStartRate {
+		t.Fatalf("before any report it sent %.1f Mbit/s, want about the start rate %.0f", got/1e6, shapeStartRate/1e6)
+	}
+	// A capacity hint (a speed test) starts it just under that rate (hints
+	// carry headroom).
+	var h Shaper
+	h.Configure(true)
+	h.SetHint(80e6, 50*time.Millisecond)
+	_, rel = drive(&h, time.Now(), time.Second, 500e6)
+	if got := rel * 8; got < 60e6 || got > 70e6 {
+		t.Fatalf("with an 80 Mbit/s hint it sent %.1f Mbit/s", got/1e6)
 	}
 	var off Shaper
 	off.Configure(false)
-	off.Observe(time.Now(), 1e6)
-	if off.Rate() != 0 || off.Delay(1<<20, time.Now()) != 0 {
-		t.Fatal("disabled shaper limited traffic")
+	if off.Delay(1<<20, time.Now()) != 0 || off.Rate() != 0 {
+		t.Fatal("disabled shaper paced")
 	}
 }
 
-func TestShaperSmoothsToDeliveryRate(t *testing.T) {
-	var s Shaper
-	s.Configure(true)
-	now := time.Now()
-	// The link keeps delivering 40 Mbit/s; startup ramps then settles.
-	for i := 0; i < 40; i++ {
-		now, _ = drive(&s, now, 250*time.Millisecond, 200e6)
-		s.Observe(now, 40e6)
+// Startup finds the link's capacity within a couple of seconds, and the
+// steady state then sends at it on average without overrunning it.
+func TestShaperFindsCapacityAndCruisesAtIt(t *testing.T) {
+	k := newShapeLink(40e6)
+	for i := 0; i < 10; i++ { // 2.5 s
+		k.interval(500e6)
 	}
-	// Over a full gain cycle the average sending rate equals delivery
-	// (probe 1.25x, drain 0.75x, cruise 1x): no standing queue.
-	var released float64
-	for i := 0; i < len(steadyCycle); i++ {
-		var rel float64
-		now, rel = drive(&s, now, 250*time.Millisecond, 200e6)
-		released += rel
-		s.Observe(now, 40e6)
+	if k.s.mode == shapeStartup {
+		t.Fatal("still in startup after 2.5 s")
 	}
-	avg := released * 8 / (float64(len(steadyCycle)) * 0.25)
-	if avg < 36e6 || avg > 46e6 {
-		t.Fatalf("average sending rate over a cycle %.1f Mbit, want ~40", avg/1e6)
+	if bw := k.s.Bandwidth(); bw < 0.85*40e6 || bw > 1.05*40e6 {
+		t.Fatalf("measured %.1f Mbit/s on a 40 Mbit/s link", bw/1e6)
 	}
-	if peak := 1.25 * 40e6; s.Rate() > peak*1.01 {
-		t.Fatalf("rate above the probe gain: %.1f", s.Rate()/1e6)
+	var total float64
+	for i := 0; i < 2*len(steadyCycle); i++ {
+		total += k.interval(500e6)
+	}
+	avg := total / float64(2*len(steadyCycle))
+	if avg < 0.85*40e6 || avg > 1.02*40e6 {
+		t.Fatalf("steady sending %.1f Mbit/s on a 40 Mbit/s link", avg/1e6)
 	}
 }
 
-func TestShaperLearnsCapacityAndKeepsItThroughIdle(t *testing.T) {
-	var s Shaper
-	s.Configure(true)
-	now := time.Now()
-	// A sender offering 200 Mbit into a 40 Mbit link: the link delivers 40,
-	// so shaping engages around that capacity.
-	for i := 0; i < 12; i++ {
-		var rel float64
-		now, rel = drive(&s, now, 250*time.Millisecond, 200e6)
-		s.Observe(now, min(40e6, rel*8/0.25))
-	}
-	// The gain cycle moves the rate between 0.75x and 1.25x of capacity.
-	if r := s.ActiveRate(now); r < 0.74*40e6 || r > 1.26*40e6 {
-		t.Fatalf("shaping rate %.1f Mbit, want within the 30-50 Mbit gain band", r/1e6)
-	}
-	learned := s.Rate()
-	for i := 0; i < 40; i++ { // 10s idle: only probes trickle
-		now = now.Add(250 * time.Millisecond)
-		s.Delay(100, now)
-		s.Observe(now, 50e3)
-	}
-	if s.Rate() < learned*0.75 {
-		t.Fatalf("idle eroded the learned rate: %.1f -> %.1f", learned/1e6, s.Rate()/1e6)
-	}
-}
-
-func TestShaperFollowsCapacityDrop(t *testing.T) {
-	var s Shaper
-	s.Configure(true)
-	now := time.Now()
+// A probe lasts one round trip, not the whole interval: the excess it sends
+// is small enough for a shallow buffer.
+func TestShaperProbeLastsOneRoundTrip(t *testing.T) {
+	k := newShapeLink(40e6)
 	for i := 0; i < 20; i++ {
-		now, _ = drive(&s, now, 250*time.Millisecond, 200e6)
-		s.Observe(now, 40e6)
+		k.interval(500e6)
 	}
-	for i := 0; i < 40; i++ { // satellite gets congested: 10 Mbit
-		now, _ = drive(&s, now, 250*time.Millisecond, 200e6)
-		s.Observe(now, 10e6)
+	for k.s.gain <= 1 { // advance to a probe interval
+		k.interval(500e6)
 	}
-	if r := s.Rate(); r > 20e6 {
-		t.Fatalf("rate should follow capacity down (~12.5), got %.1f", r/1e6)
-	}
-}
-
-// The drain phase of the gain cycle must not erode the estimate.
-func TestShaperGainCycleDoesNotRatchetDown(t *testing.T) {
-	var s Shaper
-	s.Configure(true)
-	now := time.Now()
-	for i := 0; i < 200; i++ { // 50s on a steady 40 Mbit link
-		now, _ = drive(&s, now, 250*time.Millisecond, 200e6)
-		// The link delivers what was sent, up to its 40 Mbit capacity.
-		s.Observe(now, min(40e6, max(s.Rate(), 1e6)))
-	}
-	if s.maxD < 36e6 {
-		t.Fatalf("estimate drifted down to %.1f Mbit on a steady 40 Mbit link", s.maxD/1e6)
+	sent := k.interval(500e6) // the probe interval
+	// 1.25x for 80 ms of 250 ms: ~1.08x on average, not 1.25x.
+	if r := sent / k.s.Bandwidth(); r > 1.12 {
+		t.Fatalf("probe interval sent %.2fx the measured rate", r)
 	}
 }
 
-// A fast clean link must not be held back by the shaper's own probing: when
-// everything sent is delivered, ramp up quickly.
-func TestShaperRampsWhenLinkHasHeadroom(t *testing.T) {
-	var s Shaper
-	s.Configure(true)
-	now := time.Now()
-	for i := 0; i < 12; i++ { // learn a 20 Mbit plateau (startup exits)
-		now, _ = drive(&s, now, 250*time.Millisecond, 20e6)
-		s.Observe(now, 20e6)
+func TestShaperKeepsEstimateThroughIdle(t *testing.T) {
+	k := newShapeLink(40e6)
+	for i := 0; i < 20; i++ {
+		k.interval(500e6)
 	}
-	// Demand jumps; the link could do 120 and delivers whatever we send.
-	for i := 0; i < 16; i++ {
-		var rel float64
-		now, rel = drive(&s, now, 250*time.Millisecond, 400e6)
-		sent := rel * 8 / 0.25
-		s.Observe(now, min(120e6, sent))
+	bw := k.s.Bandwidth()
+	for i := 0; i < 40; i++ { // 10 s of only probes
+		k.interval(50e3)
 	}
-	if s.Rate() < 100e6 {
-		t.Fatalf("shaper held a clean link back: %.1f Mbit after 4s", s.Rate()/1e6)
+	if k.s.Bandwidth() < 0.9*bw {
+		t.Fatalf("idle eroded the estimate %.1f -> %.1f", bw/1e6, k.s.Bandwidth()/1e6)
 	}
 }
 
-// A clean link that delivers everything is never shaped; a link that starts
-// dropping part of what is sent gets shaped, then released again.
-func TestShaperEngagesOnlyWhileLossy(t *testing.T) {
-	var s Shaper
-	s.Configure(true)
-	now := time.Now()
-	for i := 0; i < 20; i++ { // clean 100 Mbit link: delivered == sent
-		var rel float64
-		now, rel = drive(&s, now, 250*time.Millisecond, 100e6)
-		s.Observe(now, rel*8/0.25)
+func TestShaperFollowsCapacityDownAndUp(t *testing.T) {
+	k := newShapeLink(40e6)
+	for i := 0; i < 20; i++ {
+		k.interval(500e6)
 	}
-	if s.ActiveRate(now) != 0 || s.Delay(1<<20, now) != 0 {
-		t.Fatal("clean link was shaped")
+	k.capBps = 10e6 // the satellite gets congested
+	for i := 0; i < 20; i++ {
+		k.interval(500e6)
 	}
-	for i := 0; i < 8; i++ { // bursts overflow: only 30 of ~100 arrives
-		now, _ = drive(&s, now, 250*time.Millisecond, 100e6)
-		s.Observe(now, 30e6)
+	if bw := k.s.Bandwidth(); bw > 13e6 {
+		t.Fatalf("estimate stuck at %.1f Mbit/s after the link fell to 10", bw/1e6)
 	}
-	if r := s.ActiveRate(now); r == 0 || r > 60e6 {
-		t.Fatalf("lossy link not shaped near delivery: %.1f", r/1e6)
+	k.capBps = 120e6          // and recovers, with room to spare
+	for i := 0; i < 32; i++ { // 8 s
+		k.interval(500e6)
 	}
-	now = now.Add(shapeEngageFor + time.Second)
-	if s.ActiveRate(now) != 0 {
-		t.Fatal("shaping did not release after the link recovered")
+	if bw := k.s.Bandwidth(); bw < 100e6 {
+		t.Fatalf("estimate %.1f Mbit/s 8 s after the link grew to 120", bw/1e6)
+	}
+}
+
+// A hint above the link's real capacity, behind a shallow buffer: startup
+// overruns, but one short interval (or a partial first one) must not freeze
+// the estimate low; it settles near capacity within a few seconds.
+func TestShaperRecoversFromAnOptimisticHint(t *testing.T) {
+	k := newShapeLink(116e6)
+	k.s.SetHint(130e6, 76*time.Millisecond)
+	k.interval(20e6)          // the transfer starts part-way through an interval
+	for i := 0; i < 16; i++ { // 4 s
+		k.interval(500e6)
+	}
+	if bw := k.s.Bandwidth(); bw < 0.85*116e6 {
+		t.Fatalf("settled at %.1f Mbit/s on a 116 Mbit/s link", bw/1e6)
+	}
+}
+
+// A fast link that only carried a slow link's worth for a while (mirroring
+// at the slowest link's pace) must not stay locked at that rate once more
+// is offered.
+func TestShaperDoesNotLockAtLowDemand(t *testing.T) {
+	k := newShapeLink(120e6)
+	for i := 0; i < 16; i++ { // 4 s of only 30 Mbit/s offered
+		k.interval(30e6)
+	}
+	for i := 0; i < 12; i++ { // then 3 s of everything
+		k.interval(500e6)
+	}
+	if bw := k.s.Bandwidth(); bw < 100e6 {
+		t.Fatalf("stuck at %.1f Mbit/s on a 120 Mbit/s link after demand rose", bw/1e6)
 	}
 }

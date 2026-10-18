@@ -152,9 +152,12 @@ func (l *Link) QueueDrain(now time.Time) time.Duration {
 	if q == 0 {
 		return 0
 	}
-	r := max(l.Shaper.ActiveRate(now), l.Pacer.Rate())
+	// The shaper's rate is what the queue drains at. (The pacer's is not:
+	// it limits only redundant copies, so using it overstated the drain time
+	// of a fast link several times over.)
+	r := l.Shaper.ActiveRate(now)
 	if r <= 0 {
-		return 0 // rate unknown (pacing off): Congested() still guards the queue
+		return 0 // rate unknown (shaping off): Congested() still guards the queue
 	}
 	return time.Duration(float64(q*1300*8) / r * float64(time.Second))
 }

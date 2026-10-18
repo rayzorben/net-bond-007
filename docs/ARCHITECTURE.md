@@ -72,6 +72,29 @@ Lab results, eth1 only, 40 Mbit/76 ms, median of 5 runs, in Mbit/s:
 
 It wins under heavy or bursty loss and ties otherwise (ARQ and FEC already hide light loss), with a ~2.5% cost on a clean link. It stays off by default until it is field-tested.
 
+## Pacing every link (shaper)
+
+Measured in the field on 2026-10-17, from the same Ashburn server over the same Starlink dish: plain TCP ran at 4–12 Mbit/s unpaced (CUBIC) and 54–79 Mbit/s paced (BBR). Cloudflare direct got 105. Starlink punishes bursts. The shaper (`bond/shaper.go`) therefore paces every link **from the first packet**, BBR-style, from the far end's delivery reports (every ~250 ms):
+
+- **Startup:** the rate doubles each interval from the client's capacity estimate (×0.8, since estimates carry headroom) or 10 Mbit/s. It ends when delivery stops growing, or after two fully loaded intervals that each fell short (the link overflowed).
+- **Drain:** one interval at 0.75× to empty what startup queued.
+- **Probe/cruise:**
+  - The gain cycle is 1.25, 0.75, 1, …. A probe lasts one round trip, so it fits a shallow buffer, and a probe that overflows is cut short.
+  - A link that hasn't fallen short for 2 s cruises at 1.25× for whole intervals, so a fast link carrying only what mirroring to a slow one allowed isn't locked at that rate.
+  - A probe that gets ≥3% more through restarts startup (Starlink capacity swings).
+- **Queue:** the server's per-link queue defaults to 4096 packets, since the unpaced inner TCP bursts thousands at once at 100+ Mbit/s. A packet that would wait more than 300 ms is dropped *before* it gets a sequence number, so the inner TCP sees an ordinary loss instead of one ARQ hides. Queue drain time comes from the shaper's rate only. The pacer's rate limits redundant copies, not the primary, and using it overstated the queue several-fold.
+
+Lab, 120 Mbit/s link, bottleneck `tbf` (byte queue 200 KB ≈ 13 ms) + netem, 300 MB downloads, median Mbit/s:
+
+| Profile | Direct (BBR) | Bond 0.7.9 | Bond 0.8.0 |
+|---|---|---|---|
+| Shallow buffer | 108.9 | 102.7 | 105.0 |
+| Shallow + 6 ms jitter + 0.2% loss | 104.5 | 83.7 | 92.0 (88%) |
+| Same + a 30 Mbit/s phone link | — | 62.8 | 94.4 |
+| 0.2% loss, deep buffer | 108.8 | 67.8 | 100.3 |
+
+Lab note: netem's packet `limit` penalises tunnels. Each of our datagrams is one packet, while kernel TCP reaches the qdisc as 64 KB GSO super-packets, split only after it, so "limit 150" is shallow for the bond but deep for direct TCP. Model a shallow buffer with a byte-limited `tbf` in front of netem instead.
+
 ## Health and failover
 
 - Probes go out every 250 ms per link: RTT, jitter (RTTVAR) and loss over the last 40 probes. The client reports its view to the server in every probe, including the latest raw RTT and per-interval delivered rate.
