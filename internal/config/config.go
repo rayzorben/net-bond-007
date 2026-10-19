@@ -27,6 +27,8 @@ type Client struct {
 	SpeedTest  SpeedTest       `json:"speedTest" label:"Speed tests" help:"Measure each connection's real bandwidth now and then, only while it is idle."`
 	Relay      Relay           `json:"relay" label:"Phone relays" help:"Phones on your network running the Net-Bond-007 Relay app share their cellular data as bonded links."`
 	Links      map[string]Link `json:"links" schema:"-"`
+	// Forwards open public ports on the server for LAN devices (router mode).
+	Forwards []Forward `json:"forwards" schema:"-"`
 	// Version of the saved settings format, used to migrate old defaults.
 	Version int `json:"configVersion" schema:"-"`
 	UI      UI  `json:"ui" label:"Dashboard" help:"This web interface."`
@@ -117,6 +119,63 @@ type Link struct {
 	SharePct     float64 `json:"sharePct,omitempty"`     // 0 = failover only
 	MonthlyCapGB float64 `json:"monthlyCapGB,omitempty"` // 0 = no cap
 	CycleDay     int     `json:"cycleDay,omitempty"`     // billing cycle start day (1-28); 0 = 1
+}
+
+// Forward relays a public port on the server to a device on the LAN.
+type Forward struct {
+	Name       string `json:"name,omitempty"`
+	Proto      string `json:"proto"`                // tcp, udp or both
+	Port       uint16 `json:"port"`                 // public port on the server
+	Device     string `json:"device"`               // LAN IPv4 address
+	DevicePort uint16 `json:"devicePort,omitempty"` // 0 = same as Port
+	Disabled   bool   `json:"disabled,omitempty"`
+}
+
+// ToPort is the port on the device.
+func (f Forward) ToPort() uint16 {
+	if f.DevicePort == 0 {
+		return f.Port
+	}
+	return f.DevicePort
+}
+
+// Protos lists the transport protocols the forward covers.
+func (f Forward) Protos() []string {
+	if f.Proto == "both" {
+		return []string{"tcp", "udp"}
+	}
+	return []string{f.Proto}
+}
+
+func validateForwards(fs []Forward) []error {
+	var errs []error
+	seen := map[string]int{}
+	for i, f := range fs {
+		where := fmt.Sprintf("forwards[%d]", i)
+		if f.Name != "" {
+			where = fmt.Sprintf("forward %q", f.Name)
+		}
+		if f.Proto != "tcp" && f.Proto != "udp" && f.Proto != "both" {
+			errs = append(errs, fmt.Errorf("%s: protocol must be tcp, udp or both", where))
+		}
+		if f.Port == 0 {
+			errs = append(errs, fmt.Errorf("%s: public port is required", where))
+		}
+		if a, err := netip.ParseAddr(f.Device); err != nil || !a.Is4() {
+			errs = append(errs, fmt.Errorf("%s: device must be an IPv4 address", where))
+		}
+		if f.Disabled {
+			continue
+		}
+		for _, p := range f.Protos() {
+			k := fmt.Sprintf("%s/%d", p, f.Port)
+			if j, dup := seen[k]; dup {
+				errs = append(errs, fmt.Errorf("%s: port %s is already forwarded by forwards[%d]", where, k, j))
+			}
+			seen[k] = i
+		}
+	}
+	return errs
 }
 
 type SpeedTest struct {
@@ -216,6 +275,7 @@ func (c *Client) Validate() error {
 	if c.Health.ProbeTimeoutMs < c.Health.ProbeIntervalMs {
 		errs = append(errs, errors.New("health.probeTimeoutMs must be at least the probe interval"))
 	}
+	errs = append(errs, validateForwards(c.Forwards)...)
 	for name, l := range c.Links {
 		if l.Weight < 0 || l.MaxMbps < 0 {
 			errs = append(errs, fmt.Errorf("links.%s: weight and maxMbps must be >= 0", name))
@@ -304,6 +364,7 @@ type Server struct {
 	Token    string         `json:"token" label:"Access token" help:"Clients must present this token. Empty allows anyone (not recommended)." secret:"1"`
 	Network  ServerNetwork  `json:"network" label:"Client network" help:"Addresses handed to clients inside the tunnel."`
 	Egress   ServerEgress   `json:"egress" label:"Internet egress" help:"How the server reaches the internet on behalf of clients."`
+	Forward  ServerForward  `json:"portForwarding" label:"Port forwarding" help:"Clients can open public ports on this server; inbound connections are relayed through the bond to a device on the client's network."`
 	Sessions ServerSessions `json:"sessions" label:"Sessions"`
 	History  ServerHistory  `json:"history" label:"History" help:"A record on disk of link performance, events and every connection, for looking back at what happened."`
 	Speed    ServerSpeed    `json:"speedTest" label:"Speed test" help:"Measure the server's own internet connection now and then, so a slow or throttled host shows up on the dashboard."`
@@ -325,6 +386,11 @@ type ServerEgress struct {
 	TCPBufferKB     int    `json:"tcpBufferKB" label:"TCP buffer size" help:"Per-connection receive/send buffer inside the userspace stack." min:"64" max:"16384" unit:"KB" adv:"1"`
 	ICMPEcho        bool   `json:"icmpEcho" label:"Forward ping" help:"Forward ICMP echo (ping) for clients using unprivileged ping sockets." adv:"1"`
 	MaxConnsPerUser int    `json:"maxConnsPerSession" label:"Max connections per client" min:"16" max:"1000000" adv:"1"`
+}
+
+type ServerForward struct {
+	Disabled bool   `json:"disabled" label:"Turn off port forwarding" help:"Close every forwarded port and refuse new ones."`
+	Ports    string `json:"ports" label:"Public ports" help:"Comma-separated ports or ranges clients may open. They must also be published by the container and allowed by the host's firewall." fill:"1"`
 }
 
 type ServerSpeed struct {
@@ -367,6 +433,7 @@ func DefaultServer() *Server {
 			IdleTimeoutSec: 120, LinkTimeoutMs: 1200, MaxSessions: 1000, HistorySeconds: 300,
 			DefaultQueue: 4096, TrustClientRate: true,
 		},
+		Forward: ServerForward{Ports: "40000-40019"},
 		History: ServerHistory{Enabled: true, RetentionDays: 14, SampleSec: 10},
 		Speed: ServerSpeed{Enabled: true, IntervalHours: 6, Seconds: 6, LimitedMbps: 200, URL: "https://speed.cloudflare.com",
 			FallbackURLs: "https://ash-speed.hetzner.com/1GB.bin,https://hil-speed.hetzner.com/1GB.bin,https://fsn1-speed.hetzner.com/1GB.bin,https://hel1-speed.hetzner.com/1GB.bin,https://sin-speed.hetzner.com/1GB.bin"},
@@ -387,6 +454,9 @@ func (s *Server) Validate() error {
 		if _, _, err := splitHostPort(s.Egress.DNSUpstream); err != nil {
 			errs = append(errs, fmt.Errorf("egress.dnsUpstream: %w", err))
 		}
+	}
+	if _, err := sched.ParsePorts(s.Forward.Ports); err != nil {
+		errs = append(errs, fmt.Errorf("portForwarding.ports: %w", err))
 	}
 	errs = append(errs, checkRanges(s)...)
 	return errors.Join(errs...)

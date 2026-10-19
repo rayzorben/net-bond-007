@@ -6,6 +6,10 @@ services:
     restart: unless-stopped
     ports:
       - "7007:7007/udp"
+      # Port forwarding (server setting portForwarding.ports); the host
+      # firewall / cloud security list must allow them too.
+      - "40000-40019:40000-40019/tcp"
+      - "40000-40019:40000-40019/udp"
       - "8080:8080/tcp"
     environment:
       NET_BOND_007_TOKEN: ${NET_BOND_007_TOKEN:?set NET_BOND_007_TOKEN}

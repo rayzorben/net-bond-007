@@ -5,6 +5,7 @@ package platform
 import (
 	"bufio"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"testing"
@@ -93,6 +94,37 @@ func TestPinNftRules(t *testing.T) {
 	}
 	if strings.Contains(rules, "0x02000000 meta l4proto tcp reject") {
 		t.Fatal("a live path is being reset")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft not installed")
+	}
+	cmd := exec.Command("nft", "--check", "-f", "-")
+	cmd.Stdin = strings.NewReader(rules)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "Operation not permitted") {
+			t.Skip("nft --check needs privileges")
+		}
+		t.Fatalf("nft rejected ruleset: %v\n%s", err, out)
+	}
+}
+
+func TestPortMapNftRules(t *testing.T) {
+	rules := PortMapNftRules(PortMapSpec{
+		Tun: "net-bond-007", TunIP: netip.MustParseAddr("10.77.0.2"), LAN: []string{"br-lan"},
+		Rules: []PortMapRule{
+			{Proto: "tcp", Port: 40001, Device: netip.MustParseAddr("192.168.8.193"), DevicePort: 59220},
+			{Proto: "udp", Port: 40001, Device: netip.MustParseAddr("192.168.8.193"), DevicePort: 59220},
+		},
+	})
+	for _, want := range []string{
+		`iifname "net-bond-007" ip daddr 10.77.0.2 udp dport 40001 dnat to 192.168.8.193:59220`,
+		`oifname "net-bond-007" ip saddr 192.168.8.193 udp sport 59220 snat to 10.77.0.2:40001`,
+		`iifname { "br-lan" } ct state new ip saddr 192.168.8.193 tcp sport 59220 ct mark set ct mark | 0x10000000`,
+		`iifname != "net-bond-007" ct mark & 0x10000000 != 0 meta mark set meta mark | 0x10000000`,
+	} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("missing %q in\n%s", want, rules)
+		}
 	}
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft not installed")

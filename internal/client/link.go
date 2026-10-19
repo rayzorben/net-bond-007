@@ -148,6 +148,11 @@ func (l *clink) reader() {
 				l.link.Health(func(h *bond.Health) { h.RTT.Update(rtt); owd = h.RTT.OneWay() })
 				l.link.SetOneWayDelay(owd)
 			}
+		case proto.TypeForwards:
+			var st proto.ForwardStatus
+			if proto.ParseJSON(f, &st) == nil {
+				l.c.onForwardStatus(st)
+			}
 		case proto.TypeHelloAck:
 			var a proto.HelloAck
 			if proto.ParseJSON(f, &a) == nil {

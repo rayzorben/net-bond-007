@@ -75,7 +75,9 @@ type Client struct {
 	tunSpec platform.TunnelSpec
 	tunUndo func()
 	tunErr  string
-	pins    pinState // guarded by tunMu
+	pins    pinState     // guarded by tunMu
+	portmap portMapState // guarded by tunMu
+	fwd     atomic.Pointer[fwdStatus]
 	guard   guardState
 	direct  directMeter
 
@@ -263,6 +265,7 @@ func (c *Client) wirePolicy() proto.Policy {
 		ReorderMode:            cfg.Bonding.ReorderMode,
 		ReorderMs:              cfg.Bonding.ReorderMs,
 		QueueDepth:             cfg.Bonding.QueueDepth,
+		Forwards:               wireForwards(cfg),
 	}
 }
 
@@ -719,6 +722,7 @@ func (c *Client) applyTunnel() {
 	}
 	c.tunErr = ""
 	c.refreshPinsLocked(cfg)
+	c.refreshPortMapLocked(cfg)
 	if spec.Direct {
 		c.log.Info("going direct, bypassing the tunnel", "via", spec.DirectDev, "gateway", spec.DirectGW)
 		return
@@ -740,6 +744,7 @@ func (c *Client) closeTunnel() {
 
 func (c *Client) closeTunnelLocked() {
 	c.clearPinsLocked()
+	c.clearPortMapLocked()
 	if c.tunUndo != nil {
 		c.tunUndo()
 		c.tunUndo = nil
@@ -1030,6 +1035,27 @@ func (b Backend) Routes(mux *http.ServeMux) {
 			return
 		}
 		webui.WriteJSON(w, http.StatusOK, lc)
+	})
+	mux.HandleFunc("GET /api/x/forwards", func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteJSON(w, http.StatusOK, b.C.Forwards())
+	})
+	// Replace the whole list of port forwards.
+	mux.HandleFunc("PUT /api/x/forwards", func(w http.ResponseWriter, r *http.Request) {
+		var fs []config.Forward
+		if err := json.NewDecoder(r.Body).Decode(&fs); err != nil {
+			webui.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if fs == nil {
+			fs = []config.Forward{}
+		}
+		if err := b.C.cfg.Mutate(func(c *config.Client) { c.Forwards = fs }); err != nil {
+			webui.WriteJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		b.C.policySent.Store(0) // tell the server now, not in up to 5 s
+		b.C.poke()
+		webui.WriteJSON(w, http.StatusOK, b.C.Forwards())
 	})
 	mux.HandleFunc("POST /api/x/abtest", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

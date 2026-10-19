@@ -90,6 +90,8 @@ func (t Type) String() string {
 		return "FEC"
 	case TypeQuiet:
 		return "QUIET"
+	case TypeForwards:
+		return "FORWARDS"
 	}
 	return "UNKNOWN"
 }
@@ -335,6 +337,37 @@ type Policy struct {
 	// Metered links (phone hotspots): the share of traffic each may carry
 	// while other links work (0 = failover only). Absent = not metered.
 	MeteredShare map[uint8]float64 `json:"meteredShare,omitempty"`
+	// Port forwards: public ports on the server whose inbound connections
+	// are relayed to the client's tunnel address (same port).
+	Forwards []Forward `json:"forwards,omitempty"`
+}
+
+// Forward asks the server to open one public port. Proto is "tcp", "udp"
+// or "both".
+type Forward struct {
+	Proto string `json:"proto"`
+	Port  uint16 `json:"port"`
+}
+
+// TypeForwards is the server's answer to a POLICY that carries forwards (or
+// to the first one after they were all removed): what it opened, and why it
+// couldn't open the rest. Body: JSON ForwardStatus.
+const TypeForwards Type = 14
+
+type ForwardStatus struct {
+	Enabled  bool           `json:"enabled"`
+	Ports    string         `json:"ports"` // the public ports clients may ask for
+	Forwards []ForwardState `json:"forwards"`
+}
+
+// ForwardState: State is "open", "taken" (another client holds the port),
+// "outside" (not in the server's port range), "off" (forwarding disabled
+// on the server) or "error" (Error says why).
+type ForwardState struct {
+	Proto string `json:"proto"`
+	Port  uint16 `json:"port"`
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
 }
 
 // RelayHello announces a phone that shares its cellular data. The phone

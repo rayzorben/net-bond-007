@@ -83,6 +83,7 @@
         <h2>{s.name} <span class="chip">{s.os}</span> <span class="chip accent">{s.ip}</span>
           <span class="chip mono" class:warn={s.version !== store.info?.version} title={s.version !== store.info?.version ? `Client runs v${s.version}, server runs v${store.info?.version}` : 'Same version as the server'}>v{s.version}{s.version !== store.info?.version ? ' ⚠' : ''}</span></h2>
         <p class="muted">session {s.id} · connected {duration((Date.now() - s.created) / 1000)} · mode {s.engine.mode}{s.engine.mode === 'smart' || s.engine.mode === 'custom' ? ` ×${s.engine.redundancy}` : ''}{s.engine.arq ? ` · ${count(s.engine.retransmits)} packets re-sent` : ''}</p>
+        {#if s.forwards?.length}<p class="muted">public ports {s.forwards.map((f) => `${f.port}/${f.proto}`).join(', ')}</p>{/if}
       </div>
       <button class="btn sm danger" onclick={() => kick(s.id, s.name)}><UserX size={14} />Disconnect</button>
     </div>

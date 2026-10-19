@@ -232,7 +232,7 @@ func newRig(t *testing.T, links []struct {
 	name, kind string
 	delay      time.Duration
 	loss       float64
-}, mutate func(*config.Client)) *rig {
+}, mutate func(*config.Client), smutate ...func(*config.Server)) *rig {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if os.Getenv("E2E_LOG") != "" {
@@ -241,6 +241,9 @@ func newRig(t *testing.T, links []struct {
 	scfg := config.DefaultServer()
 	scfg.Listen = "127.0.0.1:0"
 	scfg.Token = "s3cret"
+	for _, m := range smutate {
+		m(scfg)
+	}
 	sstore := config.NewMemory(scfg)
 	srv, err := server.New(sstore, log)
 	if err != nil {

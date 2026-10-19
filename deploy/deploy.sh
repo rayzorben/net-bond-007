@@ -64,7 +64,7 @@ PY
      rm -rf /usr/bin/net-bond-007* /etc/init.d/net-bond-007 /tmp/nb /tmp/net-bond-007* /tmp/install0* \
             /root/net-bond-007.* /root/net-bond-007-rollback.log /root/pre-0.7.0 /root/client.json.* \
             /etc/net-bond-007/*-opkg /etc/net-bond-007/client.json.*
-     ip rule | grep -qE "lookup (7007|71[0-9][0-9])" && echo "note: leftover ip rules:" && ip rule | grep -E "lookup (7007|71[0-9][0-9])"
+     ip rule | grep -qE "lookup (7007|7090|71[0-9][0-9])" && echo "note: leftover ip rules:" && ip rule | grep -E "lookup (7007|7090|71[0-9][0-9])"
      true'
 
   say "Router: install $VERSION with bonding off"
@@ -91,6 +91,11 @@ deploy_server() {
   rsync -az --delete --exclude .git --exclude node_modules --exclude /dist --exclude .cache --exclude .claude \
     --exclude 'deploy/router/backups' --exclude '*.env' ./ "$SERVER_SSH":net-bond-007-src/ 2>&1 | grep -v '^\*\*' || true
   S "cd ~/net-bond-007-src && sudo docker build -q --build-arg VERSION=$VERSION -t $IMAGE:$VERSION -t $IMAGE:latest . >/dev/null"
+
+  say "Server: publish the port-forwarding range"
+  # Same range as portForwarding.ports' default; the OCI security list
+  # (NSG mudengine-web) must allow it as well.
+  S "cd /opt/net-bond-007 && grep -q '40000-40019' docker-compose.yml || sudo sed -i 's#^\\( *\\)- \"7007:7007/udp\"#&\\n\\1- \"40000-40019:40000-40019/tcp\"\\n\\1- \"40000-40019:40000-40019/udp\"#' docker-compose.yml; grep -n '/udp\\|/tcp' docker-compose.yml"
 
   say "Server: restart on $VERSION, remove every old image"
   # Detached so a dropped SSH session (the PC may ride the bond) can't interrupt it.

@@ -149,4 +149,7 @@ func (c *Client) pinTick(cfg *config.Client) {
 	if c.pins.on || (c.tun != nil && c.pinsWanted(cfg)) {
 		c.refreshPinsLocked(cfg)
 	}
+	if c.portmap.on || (c.tun != nil && c.portMapWanted(cfg)) {
+		c.refreshPortMapLocked(cfg)
+	}
 }

@@ -35,6 +35,12 @@ for d in $(ip rule | awk '/lookup 7007/ {print $5}'); do
   while ip rule del to "$d" lookup 7007 2>/dev/null; do :; done
 done
 ip route flush table 7007 2>/dev/null
+# Port forwarding (0.8.6+).
+nft delete table ip net_bond_007_ports 2>/dev/null
+while ip rule del pref 5898 2>/dev/null; do :; done
+ip route flush table 7090 2>/dev/null
+rm -f /usr/share/nftables.d/chain-pre/*/50-net-bond-007-ports.nft
+nft -a list table inet fw4 2>/dev/null | awk '/^\tchain /{c=$2} /net-bond-007 port forwards/{print c, $NF}' | while read -r c h; do nft delete rule inet fw4 "$c" handle "$h"; done
 
 # Restore GL multi-WAN to its pre-install state.
 if [ -f /root/net-bond-007-pre-kmwan ]; then

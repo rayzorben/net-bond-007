@@ -52,6 +52,7 @@ func TestWirePolicyPopulatesEveryField(t *testing.T) {
 	cfg := config.DefaultClient()
 	cfg.Links = map[string]config.Link{"eth0": {MaxMbps: 50}}
 	cfg.Bonding.LossTolerantTCP = true // off by default; it must still reach the wire
+	cfg.Forwards = []config.Forward{{Proto: "tcp", Port: 40000, Device: "192.168.8.2"}}
 	c := New(config.NewMemory(cfg), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e := bond.New(1, func([]byte) {})
 	defer e.Close()

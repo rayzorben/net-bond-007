@@ -10,6 +10,7 @@
   import Logs from './pages/Logs.svelte'
   import Connections from './pages/Connections.svelte'
   import History from './pages/History.svelte'
+  import Ports from './pages/Ports.svelte'
 
   let bootErr = $state('')
   onMount(() => { store.boot().catch((e) => (bootErr = String(e))) })
@@ -30,6 +31,8 @@
       <Connections />
     {:else if store.page === 'history'}
       <History />
+    {:else if store.page === 'ports'}
+      <Ports />
     {:else if store.state?.role === 'client'}
       <ClientOverview st={store.state} />
     {:else if store.state?.role === 'server'}

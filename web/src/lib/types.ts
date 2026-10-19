@@ -54,6 +54,7 @@ export interface ClientState {
 export interface SessionView {
   id: string; name: string; os: string; version: string; ip: string
   created: number; lastSeen: number; engine: EngineView; links: LinkView[] | null
+  forwards?: { proto: string; port: number; state: string }[] | null
 }
 
 export interface ServerState {

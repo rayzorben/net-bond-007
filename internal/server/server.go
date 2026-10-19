@@ -49,6 +49,7 @@ type Server struct {
 
 	gw      *netstack.Gateway
 	gwAddr  netip.Addr
+	fwd     *forwarder
 	started time.Time
 	closed  chan struct{}
 
@@ -174,6 +175,7 @@ func New(cfg *config.Store[config.Server], log *slog.Logger) (*Server, error) {
 	}
 	gw.MaxPer.Store(int64(c.Egress.MaxConnsPerUser))
 	s.gw = gw
+	s.fwd = newForwarder(s)
 	if err := s.rebind(c.Listen); err != nil {
 		return nil, err
 	}
@@ -222,6 +224,9 @@ func (s *Server) onConfig(old, c *config.Server) {
 		s.applyPolicy(ss)
 	}
 	s.mu.RUnlock()
+	if c.Forward != old.Forward {
+		s.fwd.prune() // clients reopen what is still allowed with their next policy
+	}
 }
 
 func (s *Server) rebind(addr string) error {
@@ -248,6 +253,7 @@ func (s *Server) rebind(addr string) error {
 func (s *Server) Close() {
 	defer s.hist.Close()
 	close(s.closed)
+	s.fwd.closeAll()
 	if lns := s.lns.Load(); lns != nil {
 		for _, pc := range *lns {
 			pc.close()
@@ -346,6 +352,10 @@ func (s *Server) handle(f []byte, from pkt) {
 			ss.policy = p
 			ss.policyMu.Unlock()
 			s.applyPolicy(ss)
+			st := s.fwd.reconcile(ss, p.Forwards)
+			if f, err := proto.AppendJSON(nil, proto.TypeForwards, ss.ID, l.ID, st); err == nil {
+				l.SendRaw(f)
+			}
 			if p.AutoMode != old.AutoMode || p.AutoDirectVia != old.AutoDirectVia || fmt.Sprint(p.Benched) != fmt.Sprint(old.Benched) {
 				s.event(ss, autoEvent(ss, p))
 			}
@@ -675,6 +685,7 @@ func (s *Server) tick(now time.Time) {
 			s.gw.SetLossTolerant(ss.IP, false)
 		}
 		s.mu.Unlock()
+		s.fwd.release(ss)
 		ss.Engine.Close()
 		s.log.Info("client session expired", "client", ss.Name, "session", fmt.Sprintf("%08x", ss.ID))
 		s.event(ss, "client session ended (idle)")
@@ -693,6 +704,8 @@ type SessionView struct {
 	LastSeen int64           `json:"lastSeen"`
 	Engine   bond.EngineView `json:"engine"`
 	Links    []bond.LinkView `json:"links"`
+	// Forwards are the public ports open for this client.
+	Forwards []proto.ForwardState `json:"forwards"`
 }
 
 type StateView struct {
@@ -745,6 +758,7 @@ func (s *Server) Snapshot(history int) StateView {
 			IP: ss.IP.String(), Created: ss.Created.UnixMilli(),
 			LastSeen: time.Unix(0, ss.lastSeen.Load()).UnixMilli(),
 			Engine:   ss.Engine.View(),
+			Forwards: s.fwd.views(ss),
 		}
 		for _, l := range ss.Engine.Links() {
 			sv.Links = append(sv.Links, l.View(history))
@@ -857,6 +871,7 @@ func (b Backend) Routes(mux *http.ServeMux) {
 				delete(b.S.byIP, ss.IP)
 				b.S.pool.free(ss.IP)
 				ss.Engine.Close()
+				go b.S.fwd.release(ss)
 			}
 		}
 		b.S.mu.Unlock()

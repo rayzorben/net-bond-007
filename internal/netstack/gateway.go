@@ -77,7 +77,18 @@ type Gateway struct {
 	// Clients whose inner TCP uses the loss-tolerant congestion control
 	// (netip.Addr -> struct{}); everyone else gets CUBIC.
 	lossTolerant sync.Map
+	// udpClaim, if set, may take over a new UDP flow from a client instead
+	// of the gateway dialing it (port forwarding: a forwarded port's
+	// outbound packets leave from its public socket).
+	udpClaim atomic.Pointer[UDPClaim]
 }
+
+// UDPClaim is offered every new client UDP flow (src: client tunnel
+// address, dst: internet). A non-nil result takes the flow: it is called
+// with the client side of the flow and owns it from then on.
+type UDPClaim func(src, dst netip.AddrPort) func(local net.Conn)
+
+func (g *Gateway) SetUDPClaim(f UDPClaim) { g.udpClaim.Store(&f) }
 
 // SetLossTolerant chooses the congestion control for a client's new inner
 // TCP connections: the patched-in "bbr" (loss-tolerant, see
@@ -151,7 +162,17 @@ func New(gateway netip.Addr, mtu int, tcpBuf int, opts Options, out func(dst net
 }
 
 func (g *Gateway) SetOptions(o Options) { g.opts.Store(&o) }
-func (g *Gateway) SetDialer(d Dialer)   { g.dial.Store(&d) }
+
+// AllowLoopback lets loopback-addressed packets through the stack (tests,
+// whose "internet" is 127.0.0.1).
+func (g *Gateway) AllowLoopback() {
+	opt := tcpip.AllowExternalLoopbackTrafficOption(true)
+	g.stack.SetNetworkProtocolOption(ipv4.ProtocolNumber, &opt)
+}
+
+// UDPIdle is how long a UDP flow may stay silent before it is dropped.
+func (g *Gateway) UDPIdle() time.Duration { return g.opts.Load().UDPIdleTimeout }
+func (g *Gateway) SetDialer(d Dialer)     { g.dial.Store(&d) }
 
 func (g *Gateway) Close() {
 	g.cancel()
@@ -334,6 +355,15 @@ func (g *Gateway) handleUDP(r *udp.ForwarderRequest) bool {
 		g.Stats.Blocked.Add(1)
 		return true
 	}
+	if claim := g.udpClaim.Load(); claim != nil && target == dst.String() {
+		if take := (*claim)(src, dst); take != nil {
+			var wq waiter.Queue
+			if ep, terr := r.CreateEndpoint(&wq); terr == nil {
+				take(gonet.NewUDPConn(&wq, ep))
+			}
+			return true
+		}
+	}
 	if !g.acquire(src.Addr()) {
 		g.Stats.Blocked.Add(1)
 		return true
@@ -389,6 +419,50 @@ func (g *Gateway) handleUDP(r *udp.ForwarderRequest) bool {
 }
 
 var _ io.Closer = (*gonet.TCPConn)(nil)
+
+func fullAddr(ap netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
+	if a := ap.Addr().Unmap(); a.Is4() {
+		return tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(a.As4()), Port: ap.Port()}, ipv4.ProtocolNumber
+	}
+	return tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom16(ap.Addr().As16()), Port: ap.Port()}, ipv6.ProtocolNumber
+}
+
+// InboundTCP relays a connection accepted on a forwarded public port into
+// the tunnel. The client sees it come from peer, the real remote address,
+// as it would behind an ordinary port forward. It returns when the
+// connection ends.
+func (g *Gateway) InboundTCP(c net.Conn, peer, client netip.AddrPort) error {
+	defer c.Close()
+	local, proto := fullAddr(peer)
+	remote, rproto := fullAddr(client)
+	if proto != rproto {
+		return errors.New("address family mismatch")
+	}
+	ctx, cancel := context.WithTimeout(g.ctx, g.opts.Load().TCPDialTimeout)
+	in, err := gonet.DialTCPWithBind(ctx, g.stack, local, remote, proto)
+	cancel()
+	if err != nil {
+		g.Stats.TCPFailed.Add(1)
+		return err
+	}
+	g.Stats.TCPTotal.Add(1)
+	g.Stats.TCPActive.Add(1)
+	defer g.Stats.TCPActive.Add(-1)
+	// Bytes the client sends count as up, as for its own connections.
+	g.relayTCP(in, c, g.opts.Load().TCPIdleTimeout)
+	return nil
+}
+
+// DialUDPFrom opens a UDP flow into the tunnel from peer (the real remote
+// address) to the client, for a forwarded public port.
+func (g *Gateway) DialUDPFrom(peer, client netip.AddrPort) (net.Conn, error) {
+	local, proto := fullAddr(peer)
+	remote, rproto := fullAddr(client)
+	if proto != rproto {
+		return nil, errors.New("address family mismatch")
+	}
+	return gonet.DialUDP(g.stack, &local, &remote, proto)
+}
 
 // TCPInfo describes each live inner TCP connection's sender state
 // (diagnostics).
