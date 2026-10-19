@@ -14,6 +14,15 @@ data class Settings(
     val relayPort: Int,
     /** Link name shown on the router dashboard. */
     val name: String,
+    /**
+     * Keep the screen on (dimmed to black) while relaying. Off screen, Android
+     * puts the phone's Wi-Fi in power save and holds traffic for up to ~2 s,
+     * which stalls calls through the relay; the low-latency Wi-Fi lock only
+     * works while this app is on screen.
+     */
+    val keepAwake: Boolean = true,
+    /** Keep awake only while the phone is plugged in (on battery it sleeps as usual). */
+    val keepAwakeOnlyCharging: Boolean = true,
 ) {
     companion object {
         const val DEFAULT_PORT = 7008
@@ -26,6 +35,8 @@ data class Settings(
                 routerPort = p.getInt("routerPort", DEFAULT_PORT),
                 relayPort = p.getInt("relayPort", DEFAULT_PORT),
                 name = p.getString("name", null) ?: Build.MODEL,
+                keepAwake = p.getBoolean("keepAwake", true),
+                keepAwakeOnlyCharging = p.getBoolean("keepAwakeOnlyCharging", true),
             )
         }
 
@@ -36,6 +47,8 @@ data class Settings(
                 .putInt("routerPort", s.routerPort)
                 .putInt("relayPort", s.relayPort)
                 .putString("name", s.name)
+                .putBoolean("keepAwake", s.keepAwake)
+                .putBoolean("keepAwakeOnlyCharging", s.keepAwakeOnlyCharging)
                 .apply()
         }
     }

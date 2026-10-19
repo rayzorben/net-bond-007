@@ -20,9 +20,9 @@ import (
 
 // Speed tests: every so often, each connection is tested on its own (sockets
 // pinned to that interface, not through the bond) to learn its real download
-// and upload bandwidth. Tests run only while the connection is quiet, are
-// debounced, and are triggered by time, by a change of local or public
-// address (a new network), or by hand.
+// and upload bandwidth. Tests run only while the connection is quiet and no
+// call is on, at most hourly, and are triggered once a day (see schedule.go),
+// by a change of local or public address (a new network), or by hand.
 
 type SpeedResult struct {
 	At       time.Time `json:"at"`
@@ -238,17 +238,19 @@ func (c *Client) speedTick(now time.Time, cfg *config.Client) {
 			switch last := t.lastAttempt(it.Name); {
 			case last.IsZero() && now.Sub(st.firstSeen) > time.Minute:
 				t.markDue(st, "first test", now)
-			case !last.IsZero() && now.Sub(last) >= time.Duration(sc.IntervalHours*float64(time.Hour)):
-				t.markDue(st, "scheduled", now)
+			case !last.IsZero() && dailyDue(last, now, sc.DailyAt):
+				t.markDue(st, "daily", now)
 			}
+		} else if st.dueReason == "daily" && dailySlot(now, sc.DailyAt).IsZero() {
+			st.dueReason = "" // never got quiet in the window: wait for tomorrow
 		}
 		if t.running != "" || st.dueReason == "" || (lc.Metered && !sc.Metered) {
 			continue
 		}
-		if now.Sub(t.lastAttempt(it.Name)) < time.Duration(sc.MinGapMinutes)*time.Minute {
+		if now.Sub(t.lastAttempt(it.Name)) < minGap(sc) {
 			continue // debounce
 		}
-		if st.rateMbps >= idleLimit(sc, now.Sub(st.dueSince)) {
+		if st.rateMbps >= idleLimit(sc, now.Sub(st.dueSince)) || c.callActive(now) {
 			continue // busy: wait for a quiet moment
 		}
 		reason := st.dueReason
@@ -355,7 +357,7 @@ func (c *Client) SpeedReport() SpeedReport {
 			sl.TrafficMbps = st.rateMbps
 		}
 		last := t.lastAttempt(it.Name)
-		gapUntil := last.Add(time.Duration(sc.MinGapMinutes) * time.Minute)
+		gapUntil := last.Add(minGap(sc))
 		switch {
 		case t.running == it.Name:
 			sl.Status, sl.Phase = "testing", t.phase
@@ -371,9 +373,11 @@ func (c *Client) SpeedReport() SpeedReport {
 			case now.Before(gapUntil):
 				sl.Status = "waiting"
 				sl.NextAt = &gapUntil
-				sl.Detail = fmt.Sprintf("Due (%s), but tested recently; waiting until %s.", st.dueReason, gapUntil.Format("15:04"))
+				sl.Detail = fmt.Sprintf("Due (%s), but tested recently; waiting until %s.", st.dueReason, gapUntil.In(localZone()).Format("15:04"))
 			case t.running != "":
 				sl.Status, sl.Detail = "waiting", fmt.Sprintf("Due (%s); waiting for the test of %s to finish.", st.dueReason, t.running)
+			case c.callActive(now):
+				sl.Status, sl.Detail = "waiting", fmt.Sprintf("Due (%s); waiting for the call to end.", st.dueReason)
 			case st.rateMbps >= lim:
 				sl.Status = "waiting"
 				sl.Detail = fmt.Sprintf("Due (%s); waiting for a quiet moment: %.1f Mbit/s in use, starts below %.1f Mbit/s", st.dueReason, st.rateMbps, lim)
@@ -387,7 +391,7 @@ func (c *Client) SpeedReport() SpeedReport {
 		default:
 			sl.Status = "idle"
 			if !last.IsZero() {
-				next := last.Add(time.Duration(sc.IntervalHours * float64(time.Hour)))
+				next := nextDaily(now, sc.DailyAt)
 				sl.NextAt = &next
 				sl.Detail = "Next scheduled test " + next.Format("Jan 2 15:04") + " (or sooner if the address changes)."
 			} else {

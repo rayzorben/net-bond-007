@@ -154,13 +154,52 @@ func (c *Client) relayHello(from netip.AddrPort, h proto.RelayHello, now time.Ti
 		r.peers[link] = p
 	}
 	changed := !ok || p.addr != from || p.hello.Cellular != h.Cellular
+	power := !ok || flag(p.hello.Awake) != flag(h.Awake) || flag(p.hello.BatteryExempt) != flag(h.BatteryExempt)
 	p.addr, p.hello, p.seen = from, h, now
 	r.mu.Unlock()
 	if changed {
 		c.log.Info("phone relay", "link", link, "phone", from, "model", h.Model, "cellular", h.Cellular)
 		c.poke() // add or update the link now rather than at the next scan
 	}
+	if power {
+		c.log.Info("phone relay power", "link", link, "awake", flag(h.Awake), "battery_exempt", flag(h.BatteryExempt))
+	}
 	return proto.RelayAck{OK: true, Server: cfg.Server.Address}
+}
+
+// flag renders an optional phone report: "yes", "no" or "unknown".
+func flag(b *bool) string {
+	switch {
+	case b == nil:
+		return "unknown"
+	case *b:
+		return "yes"
+	}
+	return "no"
+}
+
+// relayWarnings explains phones that will stall a call: off screen, Android
+// puts their Wi-Fi in power save and holds traffic for up to ~2 s.
+func (c *Client) relayWarnings() []string {
+	r := &c.relays
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	names := make([]string, 0, len(r.peers))
+	for n := range r.peers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, n := range names {
+		h := r.peers[n].hello
+		if flag(h.Awake) == "no" {
+			out = append(out, "Phone relay "+n+": the phone is not keeping awake, so Android puts its Wi-Fi to sleep and holds traffic for up to 2 s (calls stall). Plug the phone in and leave the relay app open; it dims itself.")
+		}
+		if flag(h.BatteryExempt) == "no" {
+			out = append(out, "Phone relay "+n+": battery optimisation is on for the relay app, so Android may pause it. Tap Fix in the app.")
+		}
+	}
+	return out
 }
 
 // relayFromLAN accepts phones only on networks this machine serves (LAN
@@ -246,6 +285,7 @@ func (c *Client) relayInfo(link string, now time.Time) *bond.RelayInfo {
 		Phone: p.addr.Addr().String(), Model: h.Model, Carrier: h.Carrier, Version: h.Version,
 		Cellular: h.Cellular, Battery: h.Battery, Charging: h.Charging, TempC: h.TempC,
 		Thermal: h.Thermal, Signal: h.Signal, SeenMs: now.Sub(p.seen).Milliseconds(),
+		Awake: h.Awake, BatteryExempt: h.BatteryExempt,
 	}
 }
 

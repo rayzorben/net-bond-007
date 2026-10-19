@@ -15,9 +15,12 @@ import (
 // Never slower than direct: bonding exists to beat a single link, so when it
 // measurably loses to the best physical link on its own, new connections go
 // direct over that link. A download through the bond and one over the link
-// are timed back to back every directGuardMinutes and a few minutes after the
-// set of links changes. Leaving takes a clear bond win (hysteresis), and a
-// direct link that stops working sends traffic back to the bond at once.
+// are timed back to back a few minutes after bonding starts, at the daily
+// test time, and a few minutes after a link's address changes (a new
+// network), at most hourly and never during a call (see schedule.go). A link
+// dropping out and coming back with the same address is not a reason to
+// test. Leaving takes a clear bond win (hysteresis), and a direct link that
+// stops working sends traffic back to the bond at once.
 
 const (
 	guardURL = "https://speed.cloudflare.com/__down?bytes=25000000"
@@ -39,8 +42,11 @@ type guardState struct {
 	viaID     uint8
 	via       string
 	running   bool
-	nextAt    time.Time
-	linkSig   string
+	started   bool              // enabled and waiting for or past its first test
+	due       string            // why a test is wanted ("" = none)
+	nextAt    time.Time         // a wanted test waits until then (settling)
+	lastRun   time.Time         // last test started
+	addrs     map[string]string // link -> last address seen
 	badSince  time.Time
 	bonded    float64 // Mbit/s, last test
 	direct    float64
@@ -79,19 +85,17 @@ func (c *Client) guardTick(now time.Time, cfg *config.Client, links []*clink) {
 		if c.guard.active {
 			c.log.Info("never slower than direct: off; traffic returns to the bond")
 		}
-		c.guard.active, c.guard.nextAt, c.guard.linkSig = false, time.Time{}, ""
+		c.guard.active, c.guard.started, c.guard.due, c.guard.nextAt = false, false, "", time.Time{}
 		c.mu.Unlock()
 		return
 	}
-	var names []string
 	var via *clink
+	addrs := map[string]string{}
 	for _, l := range links {
-		if l.link.State().Usable() && !l.link.Benched() {
-			names = append(names, l.iface.Name)
+		if ip := l.iface.PrimaryIPv4(); ip.IsValid() {
+			addrs[l.iface.Name] = ip.String()
 		}
 	}
-	slices.Sort(names)
-	sig := strings.Join(names, ",")
 
 	c.mu.Lock()
 	g := &c.guard
@@ -110,24 +114,54 @@ func (c *Client) guardTick(now time.Time, cfg *config.Client, links []*clink) {
 		case now.Sub(g.badSince) >= guardFailAfter:
 			c.log.Warn("never slower than direct: the direct link stopped working; traffic returns to the bond", "via", g.via)
 			g.active, g.badSince = false, time.Time{}
-			g.nextAt = now.Add(guardSettle)
 		}
 	}
-	if sig != g.linkSig {
-		g.linkSig = sig
-		if soon := now.Add(guardSettle); g.nextAt.IsZero() || g.nextAt.After(soon) {
-			g.nextAt = soon
+	want := func(reason string) {
+		if g.due == "" {
+			g.due, g.nextAt = reason, now.Add(guardSettle)
 		}
 	}
-	due := !g.running && !g.nextAt.IsZero() && !now.Before(g.nextAt)
+	if !g.started {
+		g.started = true
+		want("bonding started")
+	}
+	if moved := g.noteAddrs(addrs); len(moved) > 0 {
+		want("address changed: " + strings.Join(moved, ", "))
+	}
+	if g.due == "" && !g.lastRun.IsZero() && dailyDue(g.lastRun, now, cfg.SpeedTest.DailyAt) {
+		want("daily")
+	}
+	due := g.due != "" && !g.running && !now.Before(g.nextAt) &&
+		(g.lastRun.IsZero() || now.Sub(g.lastRun) >= minGap(cfg.SpeedTest)) && !c.callActive(now)
 	if due {
-		g.running = true
-		g.nextAt = now.Add(time.Duration(cfg.Bonding.DirectGuardMinutes) * time.Minute)
+		c.log.Info("never slower than direct: comparing", "reason", g.due)
+		g.running, g.due, g.lastRun = true, "", now
 	}
 	c.mu.Unlock()
 	if due {
 		go c.guardTest()
 	}
+}
+
+// noteAddrs records each link's address and returns the links whose address
+// is new: a new network. A link that drops out and returns with the same
+// address is not one, and neither are the links present at start.
+func (g *guardState) noteAddrs(addrs map[string]string) []string {
+	if g.addrs == nil {
+		g.addrs = map[string]string{}
+	}
+	first := len(g.addrs) == 0
+	var moved []string
+	for name, ip := range addrs {
+		if old, seen := g.addrs[name]; !seen || old != ip {
+			if !first {
+				moved = append(moved, name+" "+ip)
+			}
+			g.addrs[name] = ip
+		}
+	}
+	slices.Sort(moved)
+	return moved
 }
 
 // guardTest compares the bond with the best physical link and updates the
@@ -240,8 +274,16 @@ func (c *Client) guardView() *GuardView {
 	if !g.testedAt.IsZero() {
 		v.TestedAt = g.testedAt.UnixMilli()
 	}
-	if !g.nextAt.IsZero() {
-		v.NextAt = g.nextAt.UnixMilli()
+	sc := c.cfg.Get().SpeedTest
+	next := nextDaily(time.Now(), sc.DailyAt)
+	if g.due != "" {
+		next = g.nextAt
+		if gap := g.lastRun.Add(minGap(sc)); !g.lastRun.IsZero() && gap.After(next) {
+			next = gap
+		}
+	}
+	if !next.IsZero() {
+		v.NextAt = next.UnixMilli()
 	}
 	return v
 }

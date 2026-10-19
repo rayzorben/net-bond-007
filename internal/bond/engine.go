@@ -75,6 +75,17 @@ type Engine struct {
 	fecOn                atomic.Bool
 	fecRx                fecStore
 	FECRecovered, FECBad atomic.Uint64
+
+	realtimeAt atomic.Int64 // unix nanos of the last real-time (call) packet sent
+}
+
+// RealtimeAt is when the bond last sent real-time media (a call is on while
+// this is recent).
+func (e *Engine) RealtimeAt() time.Time {
+	if n := e.realtimeAt.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 // SetUpstream marks this engine as the client side (what it sends travels
@@ -246,6 +257,14 @@ func (e *Engine) Send(pkt []byte) int {
 		l.earnMeter(wire)
 		othersAlive = othersAlive || l.IsAlternative(links, nowN)
 	}
+	pol := e.policy.Load()
+	info := sched.Inspect(pkt)
+	// A call is mirrored on every link that is up, benched ones included: a
+	// copy over a flaky link costs little and covers the other's dropouts.
+	realtime := pol.Realtime(info)
+	if realtime {
+		e.realtimeAt.Store(nowN)
+	}
 	var cbuf [16]sched.Candidate
 	cands := cbuf[:0]
 	for _, l := range links {
@@ -254,7 +273,7 @@ func (e *Engine) Send(pkt []byte) int {
 			Weight:  l.Weight(),
 			Usable:  l.State().Usable(),
 			Backup:  l.Backup(),
-			Benched: l.Benched(),
+			Benched: l.Benched() && !realtime,
 			Metered: l.Metered() && othersAlive && !l.meterHas(wire),
 			Degrade: l.State() == StateDegraded,
 			Delay:   l.ArrivalDelay(now) + penalty(links, l, nowN),
@@ -274,8 +293,7 @@ func (e *Engine) Send(pkt []byte) int {
 			return 0
 		}
 	}
-	pol := e.policy.Load()
-	r := pol.Copies(len(el), sched.Inspect(pkt))
+	r := pol.Copies(len(el), info)
 	// The first copy always goes on the best link and is never paced: TCP's
 	// own congestion control governs it. Pacing only limits the extra,
 	// redundant copies so slower links aren't drowned in duplicates.

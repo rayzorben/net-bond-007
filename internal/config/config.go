@@ -57,8 +57,7 @@ type Bonding struct {
 	ReliabilityRiseSec     int     `json:"reliabilityRiseSec" label:"Reliability: earn trust back over" help:"How slowly a link's reliability recovers once it works again." min:"1" max:"3600" unit:"s" adv:"1"`
 	DirectWhenSingle       bool    `json:"directWhenSingle" label:"Go direct with one link" help:"When only one reliable link remains, send traffic straight out of it instead of through the tunnel (no detour via the server, never slower than bonding off). In router mode, connections already open stay on the path they started on."`
 	DirectAfterSec         int     `json:"directAfterSec" label:"Go direct after" help:"Only one reliable link for this long before leaving the tunnel." min:"1" max:"600" unit:"s" adv:"1"`
-	DirectGuard            bool    `json:"directGuard" label:"Never slower than direct" help:"Every so often, download a test file through the bond and directly over your best link. If the bond is clearly slower, new connections go direct until a later test shows the bond winning again. A direct link that fails sends traffic back to the bond at once."`
-	DirectGuardMinutes     int     `json:"directGuardMinutes" label:"Compare bond and direct every" help:"How often the never-slower-than-direct check runs (it also runs a few minutes after links change)." min:"5" max:"1440" unit:"min" adv:"1"`
+	DirectGuard            bool    `json:"directGuard" label:"Never slower than direct" help:"Download a test file through the bond and directly over your best link when bonding starts, at the daily speed-test time, and when a link's address changes (at most once an hour, never during a call). If the bond is clearly slower, new connections go direct until a later test shows the bond winning again. A direct link that fails sends traffic back to the bond at once."`
 	BondAfterSec           int     `json:"bondAfterSec" label:"Re-bond after" help:"Two or more reliable links for this long before going back through the tunnel." min:"1" max:"3600" unit:"s" adv:"1"`
 	CopiesDownAfterSec     int     `json:"copiesDownAfterSec" label:"Reduce copies after" help:"Fewer copies only once links have stayed reliable this long (more copies apply immediately)." min:"1" max:"600" unit:"s" adv:"1"`
 	Shaping                bool    `json:"shaping" label:"Smooth bursts" help:"Send on each link at about the rate it actually delivers instead of in line-rate bursts that overflow small buffers (e.g. satellite downlinks)."`
@@ -122,9 +121,9 @@ type Link struct {
 
 type SpeedTest struct {
 	Enabled         bool    `json:"enabled" label:"Automatic speed tests" help:"Test each connection on its own (not through the bond) to learn its real download and upload speed."`
-	IntervalHours   float64 `json:"intervalHours" label:"Test every" help:"Re-test each connection this often." min:"1" max:"168" unit:"hours"`
+	DailyAt         string  `json:"dailyAt" label:"Daily test at" help:"Local time (HH:MM) of the one scheduled test a day. Pick a quiet hour: a test loads the connection flat out. A test missed by more than 2 hours waits for the next day."`
 	OnAddressChange bool    `json:"onAddressChange" label:"Re-test when the address changes" help:"A new local or public address usually means a new network (another campground Wi-Fi, a different cell tower or Starlink gateway)."`
-	MinGapMinutes   int     `json:"minGapMinutes" label:"Never more often than every" help:"Debounce: the shortest time between automatic tests of one connection." min:"5" max:"1440" unit:"min" adv:"1"`
+	MinGapMinutes   int     `json:"minGapMinutes" label:"Never more often than every" help:"Debounce: the shortest time between automatic tests of one connection (at least an hour). Tests also never run during a call." min:"60" max:"1440" unit:"min" adv:"1"`
 	IdleMbps        float64 `json:"idleMbps" label:"Only while traffic is below" help:"A test waits until the connection carries less than this, so it neither disturbs you nor gets a wrong answer." min:"0.1" max:"100" unit:"Mbit/s"`
 	IdleStepMbps    float64 `json:"idleStepMbps" label:"Raise that limit by" help:"If the connection never gets that quiet, the limit rises by this much every step until the maximum." min:"0" max:"50" unit:"Mbit/s" adv:"1"`
 	IdleStepMinutes int     `json:"idleStepMinutes" label:"Raise it every" min:"1" max:"240" unit:"min" adv:"1"`
@@ -156,14 +155,14 @@ func DefaultClient() *Client {
 		Server: ServerEndpoint{Address: "", Enabled: true},
 		Bonding: Bonding{
 			Mode: "smart", Strategy: "latency", Redundancy: 2, SmallPacketMirrorBytes: 160,
-			RealtimeMirror: true, RealtimePorts: "3478-3481,50000-50059,19302-19309",
+			RealtimeMirror: true, RealtimePorts: realtimePortsDefault,
 			ReorderMode: "auto", ReorderMs: 400, Retransmit: true, Shaping: true, FEC: true,
 			RepairPriority: true, StormRepair: true, OutageReports: true,
 			// LossTolerantTCP stays off until it beats CUBIC in the lab.
 			AutoScale: true, TargetDeliveryPct: 99.5, BenchBelowPct: 60, RejoinAbovePct: 75,
 			ReliabilityFallSec: 10, ReliabilityRiseSec: 60,
 			DirectWhenSingle: true, DirectAfterSec: 60, BondAfterSec: 300, CopiesDownAfterSec: 30,
-			DirectGuard: true, DirectGuardMinutes: 60, QueueDepth: 1024, LatencyWeighting: true,
+			DirectGuard: true, QueueDepth: 1024, LatencyWeighting: true,
 			Pacing: true, PacingStartMbps: 20, PacingDelayMs: 15, PacingLossPct: 10,
 		},
 		Health: Health{
@@ -173,7 +172,7 @@ func DefaultClient() *Client {
 		},
 		Tunnel: Tunnel{InterfaceName: "net-bond-007", MTU: 1380, FullTunnel: true, FailOpen: true, FailOpenSec: 8, PinConnections: true},
 		SpeedTest: SpeedTest{
-			Enabled: true, IntervalHours: 6, OnAddressChange: true, MinGapMinutes: 30,
+			Enabled: true, DailyAt: "02:00", OnAddressChange: true, MinGapMinutes: 60,
 			IdleMbps: 1, IdleStepMbps: 1, IdleStepMinutes: 15, IdleMaxMbps: 5, Seconds: 8,
 			URL: "https://speed.cloudflare.com",
 		},
@@ -225,7 +224,14 @@ func (c *Client) Validate() error {
 	return errors.Join(errs...)
 }
 
-const clientConfigVersion = 5
+const clientConfigVersion = 6
+
+// realtimePortsDefault: STUN/TURN and media ports of Teams, Meet, Zoom,
+// FaceTime and WhatsApp calls.
+const (
+	realtimePortsDefault = "3478-3497,8801-8810,19302-19309,50000-50059"
+	realtimePortsV5      = "3478-3481,50000-50059,19302-19309"
+)
 
 // Normalize fills zero values left by older or hand-edited config files and
 // migrates defaults that changed between versions.
@@ -272,6 +278,15 @@ func (c *Client) Normalize() {
 			if *m.v == m.old {
 				*m.v = m.nu
 			}
+		}
+	}
+	if c.Version < 6 {
+		// v6: tests stopped running every few hours (each one loads the link
+		// flat out, which a call on it feels): once a day at 02:00, on an
+		// address change, at most hourly. Calls also cover Zoom and FaceTime.
+		c.SpeedTest.MinGapMinutes = max(c.SpeedTest.MinGapMinutes, d.SpeedTest.MinGapMinutes)
+		if c.Bonding.RealtimePorts == realtimePortsV5 {
+			c.Bonding.RealtimePorts = realtimePortsDefault
 		}
 	}
 	c.Version = clientConfigVersion

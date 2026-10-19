@@ -77,6 +77,7 @@ type Client struct {
 	tunErr  string
 	pins    pinState // guarded by tunMu
 	guard   guardState
+	direct  directMeter
 
 	relays     relays
 	names      names.Cache
@@ -317,6 +318,7 @@ func (c *Client) loop() {
 				lastScan = now
 			}
 			c.tick(now)
+			c.directTick(now)
 			c.speedTick(now, c.cfg.Get())
 		}
 	}
@@ -800,6 +802,8 @@ type StateView struct {
 	Interfaces []IfaceView     `json:"interfaces"`
 	Warnings   []string        `json:"warnings"`
 	Auto       *AutoView       `json:"auto,omitempty"`
+	// Direct is the live traffic outside the bond while going direct.
+	Direct *DirectView `json:"direct,omitempty"`
 	// RelayListen is where phone relays announce themselves ("" = off).
 	RelayListen string `json:"relayListen,omitempty"`
 }
@@ -893,6 +897,7 @@ func (c *Client) Snapshot(history int) StateView {
 	v.Tunnel.Error = c.tunErr
 	c.tunMu.Unlock()
 	v.Tunnel.Bypass = c.bypassVia()
+	v.Direct = c.direct.view()
 	if c.NoTunnel {
 		v.Tunnel.Error = ""
 	}
@@ -925,6 +930,7 @@ func (c *Client) Snapshot(history int) StateView {
 		} else if cfg.Relay.Token == "" {
 			v.Warnings = append(v.Warnings, "Phone relays are on but no pairing token is set, so phones are refused.")
 		}
+		v.Warnings = append(v.Warnings, c.relayWarnings()...)
 	}
 	if cfg.UI.Password == "" && !isLoopbackListen(cfg.UI.Listen) {
 		v.Warnings = append(v.Warnings, "The dashboard is reachable from the network without a password.")

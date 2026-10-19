@@ -603,3 +603,44 @@ func TestMeteredLinkShareAndFailover(t *testing.T) {
 		t.Fatalf("failover: phone carried %d/500, dropped %d", got, e.NoLink.Load())
 	}
 }
+
+// A call is mirrored on a benched link too (the campground Wi-Fi flapping
+// next to Starlink): bulk traffic stays off it.
+func TestCallMirroredOnBenchedLink(t *testing.T) {
+	e := New(1, func([]byte) {})
+	defer e.Close()
+	var sent [2]atomic.Int64
+	star := e.AddLink(1, "eth0", "sim", func([]byte) error { sent[0].Add(1); return nil })
+	wifi := e.AddLink(2, "sta1", "sim", func([]byte) error { sent[1].Add(1); return nil })
+	star.SetState(StateUp)
+	wifi.SetState(StateUp)
+	wifi.SetBenched(true)
+	ports, _ := sched.ParsePorts("3478-3497")
+	e.SetPolicy(sched.Policy{Mode: sched.ModeSmart, RealtimeMirror: true, RealtimePorts: ports})
+	if !e.RealtimeAt().IsZero() {
+		t.Fatal("call seen before any call packet")
+	}
+	for i := uint32(0); i < 200; i++ {
+		e.Send(fakePkt(i)) // TCP bulk
+	}
+	time.Sleep(30 * time.Millisecond)
+	if sent[1].Load() != 0 {
+		t.Fatalf("bulk traffic went over the benched link: %d", sent[1].Load())
+	}
+	voice := make([]byte, 200)
+	voice[0] = 0x45
+	binary.BigEndian.PutUint16(voice[2:], uint16(len(voice)))
+	voice[9] = 17
+	binary.BigEndian.PutUint16(voice[20:], 50012)
+	binary.BigEndian.PutUint16(voice[22:], 3479)
+	for i := 0; i < 100; i++ {
+		e.Send(voice)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := sent[1].Load(); got < 95 {
+		t.Fatalf("call copies on the benched link: %d/100", got)
+	}
+	if time.Since(e.RealtimeAt()) > time.Second {
+		t.Fatal("call not noticed")
+	}
+}

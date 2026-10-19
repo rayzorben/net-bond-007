@@ -14,7 +14,8 @@
   }
   export type LaneRole = 'speed' | 'redundancy' | 'idle' | ''
   /** Traffic going straight out a local link instead of through the bond. */
-  export interface Direct { via: string; kind: string; why: string }
+  // rxBps/txBps: live traffic outside the bond (undefined = not measured).
+  export interface Direct { via: string; kind: string; why: string; rxBps?: number; txBps?: number }
 </script>
 
 <script lang="ts">
@@ -135,8 +136,12 @@
     while (a >= 1) { a -= 1; parts.push({ lane: 'egress', dir: Math.random() < 0.6 ? -1 : 1, t: 0, dur: 0.9, win: true, size: 2 }) }
     acc.set('egress', a)
     if (direct) {
-      let d = (acc.get('direct') ?? 0) + 6 * dt
-      while (d >= 1) { d -= 1; parts.push({ lane: 'direct', dir: Math.random() < 0.65 ? -1 : 1, t: 0, dur: 1.6, win: true, size: 2 }) }
+      const dRx = direct.rxBps ?? 0, dTx = direct.txBps ?? 0
+      const measured = direct.rxBps !== undefined
+      let d = (acc.get('direct') ?? 0) + (measured ? rate(dRx + dTx) : 6) * dt
+      // Down (towards this device) in proportion to the measured split.
+      const down = measured && dRx + dTx > 0 ? dRx / (dRx + dTx) : 0.65
+      while (d >= 1) { d -= 1; parts.push({ lane: 'direct', dir: Math.random() < down ? -1 : 1, t: 0, dur: 1.6, win: true, size: 2 }) }
       acc.set('direct', d)
     }
 
@@ -315,7 +320,7 @@
   </div>
   {#if direct}
     <div class="bypass" style="left:{bypass.mid.x}px;top:{bypass.mid.y}px;--kc:{kindColor(direct.kind)}" title={direct.why}>
-      <Route size={13} /><b>Direct</b><span>via {direct.via} · bond bypassed</span>
+      <Route size={13} /><b>Direct</b><span>via {direct.via}{#if direct.rxBps !== undefined} · ↓{bps(direct.rxBps)} ↑{bps(direct.txBps ?? 0)}{:else} · bond bypassed{/if}</span>
     </div>
   {/if}
   <div class="node net" style="left:{G}px;top:{cy}px">

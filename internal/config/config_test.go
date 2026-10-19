@@ -216,7 +216,23 @@ func TestV5SlowsSwitchingAndKeepsCustomValues(t *testing.T) {
 	if c.Bonding.BondAfterSec != 45 {
 		t.Fatalf("custom bondAfterSec overwritten: %d", c.Bonding.BondAfterSec)
 	}
-	if !c.Bonding.DirectGuard || !c.Tunnel.PinConnections || c.Bonding.DirectGuardMinutes != 60 {
+	if !c.Bonding.DirectGuard || !c.Tunnel.PinConnections {
 		t.Fatalf("new features not on after migration: guard=%v pin=%v", c.Bonding.DirectGuard, c.Tunnel.PinConnections)
+	}
+}
+
+func TestV6TestsDailyAndCoversMoreCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(path, []byte(`{"configVersion":5,"bonding":{"realtimePorts":"3478-3481,50000-50059,19302-19309","directGuardMinutes":3},"speedTest":{"enabled":true,"intervalHours":6,"minGapMinutes":30}}`), 0o600)
+	st, err := Load(path, DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := st.Get()
+	if c.SpeedTest.DailyAt != "02:00" || c.SpeedTest.MinGapMinutes != 60 {
+		t.Fatalf("speed test schedule not migrated: %+v", c.SpeedTest)
+	}
+	if c.Bonding.RealtimePorts != realtimePortsDefault {
+		t.Fatalf("realtime ports not migrated: %q", c.Bonding.RealtimePorts)
 	}
 }

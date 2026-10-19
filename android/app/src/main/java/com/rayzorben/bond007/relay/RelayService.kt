@@ -163,7 +163,11 @@ class RelayService : Service() {
             val t = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
             if (t != Int.MIN_VALUE) j.put("tempC", t / 10.0)
         }
-        j.put("thermal", getSystemService(PowerManager::class.java).currentThermalStatus)
+        val pm = getSystemService(PowerManager::class.java)
+        j.put("thermal", pm.currentThermalStatus)
+        Status.batteryExempt = pm.isIgnoringBatteryOptimizations(packageName)
+        j.put("batteryExempt", Status.batteryExempt)
+        j.put("awake", Status.awake && pm.isInteractive)
         runCatching {
             val tm = getSystemService(TelephonyManager::class.java)
             tm.signalStrength?.let { j.put("signal", it.level) } // 0..4 bars

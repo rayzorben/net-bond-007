@@ -35,6 +35,12 @@ func PinNftRules(s PinSpec) string {
 		for i, d := range s.LAN {
 			quoted[i] = fmt.Sprintf("%q", d)
 		}
+		if s.Realtime != "" && s.RealtimePath >= 1 && s.RealtimePath <= MaxPinPaths && s.RealtimePath != s.Current {
+			for _, dir := range []string{"dport", "sport"} {
+				fmt.Fprintf(&b, "    iifname { %s } ct state new ct mark & 0x%08x == 0 udp %s { %s } ct mark set ct mark & 0x%08x | 0x%08x\n",
+					strings.Join(quoted, ", "), pinMask, dir, s.Realtime, ^uint32(pinMask), pinMark(s.RealtimePath))
+			}
+		}
 		fmt.Fprintf(&b, "    iifname { %s } ct state new ct mark & 0x%08x == 0 ct mark set ct mark & 0x%08x | 0x%08x\n",
 			strings.Join(quoted, ", "), pinMask, ^uint32(pinMask), pinMark(s.Current))
 	}

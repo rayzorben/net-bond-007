@@ -69,6 +69,9 @@ type RelayInfo struct {
 	Thermal  int     `json:"thermal"`
 	Signal   int     `json:"signal"` // 0..4 bars; -1 unknown
 	SeenMs   int64   `json:"seenMs"` // since the last hello
+	// Nil when the app is too old to say; see proto.RelayHello.
+	Awake         *bool `json:"awake,omitempty"`
+	BatteryExempt *bool `json:"batteryExempt,omitempty"`
 }
 
 // TestedSpeed is the link's last stand-alone speed test.

@@ -64,6 +64,8 @@
         via phone{r.carrier ? ` · ${r.carrier}` : ''}{r.signal >= 0 ? ` · ${r.signal}/4 bars` : ''}{r.battery >= 0 ? ` · ${r.battery}%${r.charging ? '⚡' : ''}` : ''}
       </span>
       {#if r.thermal >= 3}<span class="chip warn">hot</span>{/if}
+      {#if r.awake === false}<span class="chip warn" title="The relay app is off screen: Android puts the phone's Wi-Fi to sleep and holds traffic for up to 2 s. Open the app and leave it on screen.">phone asleep</span>{/if}
+      {#if r.batteryExempt === false}<span class="chip warn" title="Battery optimisation is on for the relay app; Android may pause it.">battery-optimised</span>{/if}
     {/if}
     {#if link.backup}<span class="chip">backup</span>{/if}
     {#if link.metered}

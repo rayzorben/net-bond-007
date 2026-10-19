@@ -56,6 +56,25 @@ func TestParseAdGuardUpstreams(t *testing.T) {
 	}
 }
 
+func TestPinNftRulesRealtime(t *testing.T) {
+	s := PinSpec{LAN: []string{"br-lan"}, Current: 2, Realtime: "3478-3481, 8801", RealtimePath: 1, Paths: []PinPath{
+		{Index: 1, Dev: "net-bond-007"},
+		{Index: 2, Dev: "eth0"},
+	}}
+	rules := PinNftRules(s)
+	call := `iifname { "br-lan" } ct state new ct mark & 0x0f000000 == 0 udp dport { 3478-3481, 8801 } ct mark set ct mark & 0xf0ffffff | 0x01000000`
+	bulk := `iifname { "br-lan" } ct state new ct mark & 0x0f000000 == 0 ct mark set ct mark & 0xf0ffffff | 0x02000000`
+	i, j := strings.Index(rules, call), strings.Index(rules, bulk)
+	if i < 0 || j < 0 || i > j || !strings.Contains(rules, "udp sport { 3478-3481, 8801 }") {
+		t.Fatalf("calls must be pinned to the tunnel before the catch-all:\n%s", rules)
+	}
+	// Already in the tunnel: no exception needed.
+	s.Current = 1
+	if strings.Contains(PinNftRules(s), "dport") {
+		t.Fatal("call rule emitted while everything uses the tunnel")
+	}
+}
+
 func TestPinNftRules(t *testing.T) {
 	s := PinSpec{LAN: []string{"br-lan"}, Current: 2, Paths: []PinPath{
 		{Index: 1, Dev: "net-bond-007", Dead: true},

@@ -30,7 +30,8 @@
     const why = st.tunnel.bypass ? 'Server unreachable: all traffic goes straight out'
       : g?.active ? `The bond tested slower (${g.bondedMbps?.toFixed(0)} vs ${g.directMbps?.toFixed(0)} Mbit/s): new connections go direct, existing ones stay on the bond`
       : 'Only one reliable link: the tunnel is bypassed'
-    return { via, kind, why }
+    const d = st.direct?.via === via ? st.direct : undefined
+    return { via, kind, why, rxBps: d?.rxBps, txBps: d?.txBps }
   })
   const lanes: Lane[] = $derived(toLanes(st.links, key, { directVia: direct?.via }))
   const live = $derived(st.links.filter((l) => l.state === 'up' || l.state === 'degraded'))
@@ -117,7 +118,7 @@
     </div>
     <BondMap {lanes} leftTitle={st.name} leftSub={st.tunnel.ip ?? 'no tunnel yet'}
       rightTitle={st.server.name || st.server.address} rightSub={st.server.connected ? st.server.resolved ?? '' : 'connecting…'}
-      egress={st.engine.rxBps + st.engine.txBps} winSide="left" {direct} height={Math.max(300, Math.min(460, 140 + lanes.length * 78))}
+      egress={st.engine.rxBps + st.engine.txBps + (direct?.rxBps ?? 0) + (direct?.txBps ?? 0)} winSide="left" {direct} height={Math.max(300, Math.min(460, 140 + lanes.length * 78))}
       onselect={(k) => (store.selected = k)} />
   </section>
 

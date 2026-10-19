@@ -354,6 +354,12 @@ type RelayHello struct {
 	Carrier   string  `json:"carrier"`
 	UpBytes   uint64  `json:"upBytes"`
 	DownBytes uint64  `json:"downBytes"`
+	// Awake: the relay app is on screen with the screen on (keep-awake mode),
+	// so Android keeps the phone's Wi-Fi out of power save. Off screen, the
+	// phone holds traffic for up to ~2 s at a time. Nil: an older app.
+	Awake *bool `json:"awake,omitempty"`
+	// BatteryExempt: Android battery optimisation is off for the app.
+	BatteryExempt *bool `json:"batteryExempt,omitempty"`
 }
 
 // RelayAck accepts or refuses a relay and tells it where the server is.

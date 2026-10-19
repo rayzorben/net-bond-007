@@ -13,6 +13,12 @@ type PinSpec struct {
 	LAN     []string  // devices whose new connections are pinned (e.g. br-lan)
 	Current int       // path index that new connections take
 	Paths   []PinPath // every path that may still carry pinned connections
+	// Calls: new LAN UDP connections to or from these ports (nft set
+	// elements, "3478-3481, 50000-50059") take RealtimePath instead of
+	// Current, so a call rides the bond (mirrored on every link) even while
+	// bulk traffic goes direct. Empty or RealtimePath 0: no exception.
+	Realtime     string
+	RealtimePath int
 }
 
 // PinPath is one way out. Index 1..MaxPinPaths identifies it in conntrack

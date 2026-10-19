@@ -31,6 +31,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -82,6 +84,7 @@ private data class View(
     val signal: Int = -1,
     val carrier: String = "",
     val exempt: Boolean = true,
+    val awake: Boolean = false,
 )
 
 private fun sample(exempt: Boolean): View {
@@ -97,7 +100,7 @@ private fun sample(exempt: Boolean): View {
         bytes = Status.upBytes.get() + Status.downBytes.get(),
         packets = Status.upPackets.get() + Status.downPackets.get(), dropped = Status.dropped.get(),
         battery = Status.battery, charging = Status.charging, tempC = Status.tempC, thermal = Status.thermal,
-        signal = Status.signal, carrier = Status.carrier, exempt = exempt,
+        signal = Status.signal, carrier = Status.carrier, exempt = exempt, awake = Status.awake,
     )
 }
 
@@ -120,9 +123,14 @@ fun RelayScreen(
     var token by remember { mutableStateOf(saved.token) }
     var routerHost by remember { mutableStateOf(saved.routerHost) }
     var name by remember { mutableStateOf(saved.name) }
+    var keepAwake by remember { mutableStateOf(saved.keepAwake) }
+    var onlyCharging by remember { mutableStateOf(saved.keepAwakeOnlyCharging) }
     var settingsOpen by remember { mutableStateOf(saved.token.isEmpty()) }
     fun save() = Settings.save(
-        ctx, saved.copy(token = token.trim(), routerHost = routerHost.trim(), name = name.trim().ifEmpty { Build.MODEL }),
+        ctx, saved.copy(
+            token = token.trim(), routerHost = routerHost.trim(), name = name.trim().ifEmpty { Build.MODEL },
+            keepAwake = keepAwake, keepAwakeOnlyCharging = onlyCharging,
+        ),
     )
 
     val up by animateFloatAsState(v.up, tween(800), label = "up")
@@ -153,6 +161,17 @@ fun RelayScreen(
             v.refused?.let { Banner("The router refused this phone: $it", C.bad) }
             if (v.refused == null) v.error?.let { if (v.running) Banner(it, C.warn) }
             if (!v.exempt) Banner("Battery optimisation can pause the relay in the background.", C.warn, "Fix", onFixBattery)
+            if (v.running && !keepAwake) {
+                Banner(
+                    "With this screen off, Android puts Wi-Fi to sleep and holds traffic for up to 2 s, so calls through the phone stall. Turn on Keep awake and leave the app open.",
+                    C.warn, "Turn on",
+                ) { keepAwake = true; save() }
+            } else if (v.running && onlyCharging && !v.charging) {
+                Banner(
+                    "On battery the screen sleeps as usual, so Android naps Wi-Fi and calls through the phone can stall for up to 2 s. Plug in to keep it awake.",
+                    C.warn,
+                )
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 RateCard("Upload", "↑", up, v.upSeries, C.cellular, Modifier.weight(1f))
@@ -172,6 +191,8 @@ fun RelayScreen(
                 token = token, onToken = { token = it },
                 router = routerHost, onRouter = { routerHost = it },
                 name = name, onName = { name = it },
+                keepAwake = keepAwake, onKeepAwake = { keepAwake = it; save() },
+                onlyCharging = onlyCharging, onOnlyCharging = { onlyCharging = it; save() },
                 running = v.running, onApply = { save(); onStart() },
             )
             Text(
@@ -359,6 +380,8 @@ private fun SettingsCard(
     token: String, onToken: (String) -> Unit,
     router: String, onRouter: (String) -> Unit,
     name: String, onName: (String) -> Unit,
+    keepAwake: Boolean, onKeepAwake: (Boolean) -> Unit,
+    onlyCharging: Boolean, onOnlyCharging: (Boolean) -> Unit,
     running: Boolean, onApply: () -> Unit,
 ) {
     val turn by animateFloatAsState(if (open) 180f else 0f, label = "chevron")
@@ -379,6 +402,36 @@ private fun SettingsCard(
                 Field("Pairing token", token, onToken, "From the router's Phone relays settings", KeyboardCapitalization.None)
                 Field("Router address", router, onRouter, "Blank = the Wi-Fi gateway", KeyboardCapitalization.None)
                 Field("Link name", name, onName, "Shown on the router dashboard", KeyboardCapitalization.Words)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Keep awake", color = C.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "While relaying with this app open, keep the screen on (it fades to black after 20 s). Android only keeps Wi-Fi fast while the app is on screen.",
+                            color = C.muted, fontSize = 12.sp,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        keepAwake, onKeepAwake,
+                        colors = SwitchDefaults.colors(checkedTrackColor = C.accent, checkedThumbColor = Color.White),
+                    )
+                }
+                if (keepAwake) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Only while charging", color = C.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "On battery, let the screen sleep as usual (calls through the phone may stall).",
+                                color = C.muted, fontSize = 12.sp,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            onlyCharging, onOnlyCharging,
+                            colors = SwitchDefaults.colors(checkedTrackColor = C.accent, checkedThumbColor = Color.White),
+                        )
+                    }
+                }
                 if (running) {
                     Text(
                         "Apply and restart", color = C.accent2, fontSize = 13.sp, fontWeight = FontWeight.Bold,

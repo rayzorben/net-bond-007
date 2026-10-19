@@ -21,6 +21,11 @@ object Status {
     @Volatile var signal = -1
     @Volatile var carrier = ""
 
+    // Power: the app is on screen with the screen on (Wi-Fi out of power
+    // save), and battery optimisation is off for it. Reported to the router.
+    @Volatile var awake = false
+    @Volatile var batteryExempt = false
+
     val upBytes = AtomicLong()
     val downBytes = AtomicLong()
     val upPackets = AtomicLong()

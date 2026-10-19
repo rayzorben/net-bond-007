@@ -21,6 +21,7 @@ export interface RelayInfo {
   phone: string; model?: string; carrier?: string; version?: string
   cellular: boolean; battery: number; charging: boolean
   tempC?: number; thermal: number; signal: number; seenMs: number
+  awake?: boolean; batteryExempt?: boolean
 }
 
 export interface EngineView {
@@ -47,6 +48,7 @@ export interface ClientState {
   interfaces: IfaceView[]
   warnings: string[]
   auto?: { mode: string; copies: number; direct: boolean; directVia?: string; benched?: string[]; guard?: { active: boolean; via?: string; bondedMbps?: number; directMbps?: number; testedAt?: number; nextAt?: number; error?: string } }
+  direct?: { via: string; rxBps: number; txBps: number }
 }
 
 export interface SessionView {

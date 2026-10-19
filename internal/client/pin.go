@@ -8,6 +8,7 @@ import (
 
 	"github.com/rayzorben/net-bond-007/internal/config"
 	"github.com/rayzorben/net-bond-007/internal/platform"
+	"github.com/rayzorben/net-bond-007/internal/sched"
 )
 
 // Connection pinning (router mode, Linux): see platform/pin.go. Path 1 is the
@@ -93,6 +94,14 @@ func (c *Client) refreshPinsLocked(cfg *config.Client) {
 			ps.Current = c.pins.idx[d]
 		}
 	}
+	// Calls stay in the bond while it is answering, even when everything
+	// else goes direct: mirrored over every link, a dropout on one doesn't
+	// cut the call.
+	if bypass == "" && cfg.Bonding.RealtimeMirror {
+		if ports, err := sched.ParsePorts(cfg.Bonding.RealtimePorts); err == nil && len(ports) > 0 {
+			ps.Realtime, ps.RealtimePath = ports.NftSet(), pinTunnel
+		}
+	}
 	sig := fmt.Sprintf("%+v", ps)
 	if c.pins.on && sig == c.pins.last {
 		return
@@ -109,7 +118,7 @@ func (c *Client) refreshPinsLocked(cfg *config.Client) {
 				dead = append(dead, p.Dev)
 			}
 		}
-		c.log.Info("connections pinned to their path", "new", pathName(ps, ps.Current), "lan", strings.Join(ps.LAN, ","), "resetting", strings.Join(dead, ","))
+		c.log.Info("connections pinned to their path", "new", pathName(ps, ps.Current), "calls", pathName(ps, ps.RealtimePath), "lan", strings.Join(ps.LAN, ","), "resetting", strings.Join(dead, ","))
 	}
 	c.pins.last, c.pins.on = sig, true
 }

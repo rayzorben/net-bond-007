@@ -10,6 +10,7 @@
 package sched
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,6 +72,12 @@ type PacketInfo struct {
 	Priority bool // e.g. TCP SYN; mirrored like small packets
 }
 
+// Realtime reports whether pkt is real-time media (a call) that is mirrored
+// on every link.
+func (p Policy) Realtime(pkt PacketInfo) bool {
+	return p.RealtimeMirror && pkt.UDP && (p.RealtimePorts.Has(pkt.DstPort) || p.RealtimePorts.Has(pkt.SrcPort))
+}
+
 // Copies returns how many links a packet should travel given n usable links.
 func (p Policy) Copies(n int, pkt PacketInfo) int {
 	if n <= 0 {
@@ -79,7 +86,7 @@ func (p Policy) Copies(n int, pkt PacketInfo) int {
 	if pkt.Priority || (p.SmallPacketMirrorBytes > 0 && pkt.Len <= p.SmallPacketMirrorBytes) {
 		return n
 	}
-	if p.RealtimeMirror && pkt.UDP && (p.RealtimePorts.Has(pkt.DstPort) || p.RealtimePorts.Has(pkt.SrcPort)) {
+	if p.Realtime(pkt) {
 		return n
 	}
 	var r int
@@ -295,6 +302,19 @@ func ParsePorts(s string) (PortSet, error) {
 		ps = append(ps, portRange{uint16(l), uint16(h)})
 	}
 	return ps, nil
+}
+
+// NftSet renders the ranges as nftables set elements ("3478-3481, 5004").
+func (ps PortSet) NftSet() string {
+	parts := make([]string, len(ps))
+	for i, r := range ps {
+		if r.lo == r.hi {
+			parts[i] = strconv.Itoa(int(r.lo))
+		} else {
+			parts[i] = fmt.Sprintf("%d-%d", r.lo, r.hi)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (ps PortSet) Has(p uint16) bool {
