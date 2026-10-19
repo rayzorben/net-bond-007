@@ -32,6 +32,7 @@ class MainActivity : ComponentActivity() {
     private var lastTouch = SystemClock.elapsedRealtime()
     private var resumed = false
     private var keepOn = false
+    private var overLock = false
 
     private val tick = object : Runnable {
         override fun run() {
@@ -97,6 +98,14 @@ class MainActivity : ComponentActivity() {
     private fun update() {
         Status.awake = resumed
         val s = Settings.load(this)
+        // Show the relay over the lock screen while keep-awake is on: once the
+        // phone locks, an app that can't show there loses the screen to the
+        // lock screen or the charging screensaver, and Wi-Fi naps again.
+        val over = Status.running && s.keepAwake
+        if (over != overLock) {
+            overLock = over
+            setShowWhenLocked(over)
+        }
         val keep = resumed && Status.running && s.keepAwake && (!s.keepAwakeOnlyCharging || pluggedIn())
         if (keep != keepOn) {
             keepOn = keep

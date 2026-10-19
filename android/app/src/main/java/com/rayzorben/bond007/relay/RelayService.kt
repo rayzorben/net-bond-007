@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -49,6 +50,22 @@ class RelayService : Service() {
     private var wake: PowerManager.WakeLock? = null
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
 
+    /**
+     * Plugging in while relaying wakes the screen, so keep-awake (which may be
+     * limited to charging) takes over without unlocking: the relay screen
+     * shows over the lock screen. Without this the phone stays asleep, or the
+     * charging screensaver starts, and Wi-Fi naps.
+     */
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (!Settings.load(ctx).keepAwake) return
+            @Suppress("DEPRECATION")
+            getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "bond007:plugged")
+                .acquire(3000)
+        }
+    }
+
     private val cellCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             relay?.onCellular(network)
@@ -90,6 +107,7 @@ class RelayService : Service() {
         Status.running = true
         cm = getSystemService(ConnectivityManager::class.java)
         acquireLocks()
+        registerReceiver(powerReceiver, IntentFilter(Intent.ACTION_POWER_CONNECTED), RECEIVER_NOT_EXPORTED)
         relay = Relay(Settings.load(this), ::telemetry).also { it.start() }
 
         // requestNetwork (not registerNetworkCallback) makes Android bring
@@ -117,6 +135,7 @@ class RelayService : Service() {
             runCatching { cm.unregisterNetworkCallback(cellCallback) }
             runCatching { cm.unregisterNetworkCallback(wifiCallback) }
         }
+        runCatching { unregisterReceiver(powerReceiver) }
         relay?.close()
         relay = null
         wake?.takeIf { it.isHeld }?.release()
