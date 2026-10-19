@@ -987,11 +987,14 @@ func (b Backend) State(h int) any { return b.C.Snapshot(h) }
 func (b Backend) Config() any     { return b.C.cfg.Get() }
 func (b Backend) Schema() any     { return config.Schema(b.C.cfg.Get()) }
 func (b Backend) UpdateConfig(raw []byte) error {
-	c, err := MergeConfig(b.C.cfg.Clone(), raw)
-	if err != nil {
-		return err
-	}
-	return b.C.cfg.Update(c)
+	return b.C.cfg.MutateErr(func(c *config.Client) error {
+		n, err := MergeConfig(c, raw)
+		if err != nil {
+			return err
+		}
+		*c = *n
+		return nil
+	})
 }
 
 // MergeConfig applies a (possibly partial) JSON document to cfg. Maps present
@@ -1037,9 +1040,13 @@ func (b Backend) Routes(mux *http.ServeMux) {
 		webui.WriteJSON(w, http.StatusOK, lc)
 	})
 	mux.HandleFunc("GET /api/x/forwards", func(w http.ResponseWriter, r *http.Request) {
-		webui.WriteJSON(w, http.StatusOK, b.C.Forwards())
+		v := b.C.Forwards()
+		w.Header().Set("ETag", `"`+v.Version+`"`)
+		webui.WriteJSON(w, http.StatusOK, v)
 	})
-	// Replace the whole list of port forwards.
+	// Replace the whole list of port forwards. With If-Match (the version
+	// from GET), the list is only replaced if nobody changed it since: a
+	// stale page gets 409 instead of dropping or reverting other edits.
 	mux.HandleFunc("PUT /api/x/forwards", func(w http.ResponseWriter, r *http.Request) {
 		var fs []config.Forward
 		if err := json.NewDecoder(r.Body).Decode(&fs); err != nil {
@@ -1049,13 +1056,29 @@ func (b Backend) Routes(mux *http.ServeMux) {
 		if fs == nil {
 			fs = []config.Forward{}
 		}
-		if err := b.C.cfg.Mutate(func(c *config.Client) { c.Forwards = fs }); err != nil {
+		want := strings.Trim(strings.TrimPrefix(r.Header.Get("If-Match"), "W/"), `"`)
+		err := b.C.cfg.MutateErr(func(c *config.Client) error {
+			if want != "" && want != "*" && forwardsVersion(c.Forwards) != want {
+				return errForwardsStale
+			}
+			c.Forwards = fs
+			return nil
+		})
+		if err == errForwardsStale {
+			v := b.C.Forwards()
+			w.Header().Set("ETag", `"`+v.Version+`"`)
+			webui.WriteJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "current": v})
+			return
+		}
+		if err != nil {
 			webui.WriteJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		b.C.policySent.Store(0) // tell the server now, not in up to 5 s
 		b.C.poke()
-		webui.WriteJSON(w, http.StatusOK, b.C.Forwards())
+		v := b.C.Forwards()
+		w.Header().Set("ETag", `"`+v.Version+`"`)
+		webui.WriteJSON(w, http.StatusOK, v)
 	})
 	mux.HandleFunc("POST /api/x/abtest", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

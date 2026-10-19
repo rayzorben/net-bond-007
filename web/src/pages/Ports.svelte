@@ -3,13 +3,13 @@
   import { Plus, Pencil, Trash2, Copy, Globe, ArrowRight, TriangleAlert } from '@lucide/svelte'
   import Toggle from '../components/Toggle.svelte'
   import Segmented from '../components/Segmented.svelte'
-  import { store, api } from '../lib/store.svelte'
+  import { store, api, ApiError } from '../lib/store.svelte'
 
   interface Forward { name?: string; proto: 'tcp' | 'udp' | 'both'; port: number; device: string; devicePort?: number; disabled?: boolean }
   interface ForwardView extends Forward { public: string; state: string; error?: string }
   interface Device { ip: string; name: string; mac?: string }
   interface View {
-    forwards: ForwardView[]; serverPorts: string; serverEnabled: boolean; serverAnswer: boolean
+    forwards: ForwardView[]; version: string; serverPorts: string; serverEnabled: boolean; serverAnswer: boolean
     publicHost: string; supported: boolean; problem?: string; devices: Device[]
   }
 
@@ -20,6 +20,10 @@
   let editing = $state<number | null>(null)
   let draft = $state<Forward>({ proto: 'both', port: 0, device: '' })
   let manualIP = $state(false)
+  // The list the open form edits, as loaded when the form opened. The 3 s
+  // refresh can reorder rows under the form; saving applies the edit to this
+  // copy and the server refuses it (409) if the list changed since.
+  let base: { list: Forward[]; version: string; orig?: Forward } | null = null
 
   async function load() {
     try {
@@ -38,14 +42,19 @@
     if (f.disabled) o.disabled = true
     return o
   }
-  async function save(list: Forward[], ok: string) {
+  async function save(list: Forward[], version: string, ok: string) {
     busy = true
     try {
-      v = await api('PUT', '/api/x/forwards', list.map(plain))
+      v = await api('PUT', '/api/x/forwards', list.map(plain), { 'If-Match': `"${version}"` })
       store.toast(ok)
       editing = null
+      base = null
       return true
     } catch (e: any) {
+      if (e instanceof ApiError && e.status === 409 && e.data?.current) {
+        v = e.data.current
+        rebase()
+      }
       store.toast(e.message, 'err')
       return false
     } finally {
@@ -53,6 +62,23 @@
     }
   }
   const current = () => (v?.forwards ?? []).map(plain)
+  const same = (a: Forward, b: Forward) => JSON.stringify(plain(a)) === JSON.stringify(plain(b))
+  /** After a conflict: point the open form at the fresh list, keeping the draft. */
+  function rebase() {
+    if (editing === null || !v) return
+    if (editing === -1) {
+      base = { list: current(), version: v.version }
+      return
+    }
+    const i = v.forwards.findIndex((f) => base?.orig && same(f, base.orig))
+    if (i < 0) {
+      editing = null
+      base = null
+      return
+    }
+    editing = i
+    base = { list: current(), version: v.version, orig: base!.orig }
+  }
 
   /** Ports the server allows, expanded (capped: ranges can be large). */
   function allowed(spec: string): number[] {
@@ -73,32 +99,37 @@
     const port = freePort()
     draft = { name: '', proto: 'both', port, device: v?.devices[0]?.ip ?? '', devicePort: undefined }
     manualIP = !v?.devices.length
+    base = { list: current(), version: v?.version ?? '' }
     editing = -1
   }
   function startEdit(i: number) {
     const f = v!.forwards[i]
     draft = { name: f.name ?? '', proto: f.proto, port: f.port, device: f.device, devicePort: f.devicePort, disabled: f.disabled }
     manualIP = !v!.devices.some((d) => d.ip === f.device)
+    base = { list: current(), version: v!.version, orig: plain(f) }
     editing = i
   }
   async function submit(e: Event) {
     e.preventDefault()
-    const list = current()
+    if (!base) return
+    const list = [...base.list]
     if (editing === -1) list.push(draft)
     else if (editing !== null) list[editing] = { ...draft }
-    await save(list, editing === -1 ? `Port ${draft.port} forwarded` : 'Forward updated')
+    await save(list, base.version, editing === -1 ? `Port ${draft.port} forwarded` : 'Forward updated')
   }
   async function remove(i: number) {
     const f = v!.forwards[i]
     if (!confirm(`Stop forwarding port ${f.port}?`)) return
+    const version = v!.version
     const list = current()
     list.splice(i, 1)
-    await save(list, `Port ${f.port} closed`)
+    await save(list, version, `Port ${f.port} closed`)
   }
   async function setEnabled(i: number, on: boolean) {
+    const version = v!.version
     const list = current()
     list[i].disabled = !on || undefined
-    await save(list, on ? `Port ${list[i].port} on` : `Port ${list[i].port} off`)
+    await save(list, version, on ? `Port ${list[i].port} on` : `Port ${list[i].port} off`)
   }
   function copy(s: string) {
     navigator.clipboard?.writeText(s).then(() => store.toast(`Copied ${s}`, 'info'), () => {})
@@ -173,7 +204,7 @@
       same port as the public one: they tell peers their own port number.
     </p>
     <div class="actions">
-      <button type="button" class="btn" onclick={() => (editing = null)}>Cancel</button>
+      <button type="button" class="btn" onclick={() => { editing = null; base = null }}>Cancel</button>
       <button class="btn primary" disabled={busy}>{editing === -1 ? 'Add' : 'Save'}</button>
     </div>
   </form>

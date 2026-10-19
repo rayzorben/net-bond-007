@@ -18,6 +18,7 @@ type Validatable interface {
 // subscribers on every change so settings apply without a restart.
 type Store[T any] struct {
 	mu   sync.RWMutex
+	wmu  sync.Mutex // serializes read-modify-write (Mutate)
 	path string
 	cur  *T
 	subs []func(old, new *T)
@@ -107,8 +108,19 @@ func (s *Store[T]) Update(next *T) error {
 
 // Mutate is a convenience wrapper: clone, modify, update.
 func (s *Store[T]) Mutate(fn func(*T)) error {
+	return s.MutateErr(func(c *T) error { fn(c); return nil })
+}
+
+// MutateErr is Mutate whose fn can refuse the change (an error from fn is
+// returned and nothing is saved). Mutations are serialized, so fn sees the
+// latest config and can check it before changing it.
+func (s *Store[T]) MutateErr(fn func(*T) error) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	c := s.Clone()
-	fn(c)
+	if err := fn(c); err != nil {
+		return err
+	}
 	return s.Update(c)
 }
 

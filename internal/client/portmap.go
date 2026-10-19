@@ -1,6 +1,10 @@
 package client
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -106,6 +110,8 @@ type ForwardView struct {
 
 type ForwardsView struct {
 	Forwards []ForwardView `json:"forwards"`
+	// Version identifies the list; PUT with If-Match checks it.
+	Version string `json:"version"`
 	// What the server allows (empty until it has answered).
 	ServerPorts   string   `json:"serverPorts"`
 	ServerEnabled bool     `json:"serverEnabled"`
@@ -151,6 +157,7 @@ func (c *Client) Forwards() ForwardsView {
 	case !st.Enabled:
 		v.Problem = "Port forwarding is turned off on the server."
 	}
+	v.Version = forwardsVersion(cfg.Forwards)
 	for _, f := range cfg.Forwards {
 		fv := ForwardView{Forward: f, Public: net.JoinHostPort(host, fmt.Sprint(f.Port)), State: "waiting"}
 		switch {
@@ -177,4 +184,14 @@ func (c *Client) Forwards() ForwardsView {
 		return a.Less(b)
 	})
 	return v
+}
+
+var errForwardsStale = errors.New("The port forwards were changed somewhere else. The list has been reloaded; try again.")
+
+// forwardsVersion is a short hash of the configured list, so a save made
+// from an old copy of it can be refused.
+func forwardsVersion(fs []config.Forward) string {
+	b, _ := json.Marshal(fs)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:8])
 }

@@ -171,14 +171,18 @@ export function diff(prev: any, next: any): any {
   return any ? out : undefined
 }
 
-export async function api(method: string, url: string, body?: unknown) {
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public data: any) { super(message) }
+}
+
+export async function api(method: string, url: string, body?: unknown, headers?: Record<string, string>) {
   const r = await fetch(url, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: body || headers ? { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(data.error ?? r.statusText)
+  if (!r.ok) throw new ApiError(data.error ?? r.statusText, r.status, data)
   return data
 }
 
