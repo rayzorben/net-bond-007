@@ -81,6 +81,10 @@ type Gateway struct {
 	// of the gateway dialing it (port forwarding: a forwarded port's
 	// outbound packets leave from its public socket).
 	udpClaim atomic.Pointer[UDPClaim]
+	// UDP NAT (udpnat.go): one public socket per inner source.
+	natMu      sync.Mutex
+	nat        map[netip.AddrPort]*udpMapping
+	customDial atomic.Bool
 }
 
 // UDPClaim is offered every new client UDP flow (src: client tunnel
@@ -149,7 +153,9 @@ func New(gateway netip.Addr, mtu int, tcpBuf int, opts Options, out func(dst net
 		perIP: map[netip.Addr]int{},
 	}
 	g.MaxPer.Store(20000)
-	g.SetDialer((&net.Dialer{}).DialContext)
+	d := Dialer((&net.Dialer{}).DialContext)
+	g.dial.Store(&d)
+	g.nat = map[netip.AddrPort]*udpMapping{}
 	g.SetOptions(opts)
 
 	tcpFwd := tcp.NewForwarder(s, 0, 4096, g.handleTCP)
@@ -172,7 +178,14 @@ func (g *Gateway) AllowLoopback() {
 
 // UDPIdle is how long a UDP flow may stay silent before it is dropped.
 func (g *Gateway) UDPIdle() time.Duration { return g.opts.Load().UDPIdleTimeout }
-func (g *Gateway) SetDialer(d Dialer)     { g.dial.Store(&d) }
+
+// SetDialer replaces the outbound dialer (tests). Once set, UDP flows are
+// dialed through it one socket per flow instead of the shared NAT sockets,
+// so tests can redirect fake destinations.
+func (g *Gateway) SetDialer(d Dialer) {
+	g.dial.Store(&d)
+	g.customDial.Store(true)
+}
 
 func (g *Gateway) Close() {
 	g.cancel()
@@ -375,6 +388,14 @@ func (g *Gateway) handleUDP(r *udp.ForwarderRequest) bool {
 		return true
 	}
 	local := gonet.NewUDPConn(&wq, ep)
+	if target == dst.String() && !g.customDial.Load() {
+		go func() {
+			defer g.release(src.Addr())
+			defer local.Close()
+			g.natFlow(src, dst, local, opts.UDPIdleTimeout)
+		}()
+		return true
+	}
 	go func() {
 		defer g.release(src.Addr())
 		defer local.Close()
