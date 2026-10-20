@@ -77,6 +77,8 @@ type Engine struct {
 	FECRecovered, FECBad atomic.Uint64
 
 	realtimeAt atomic.Int64 // unix nanos of the last real-time (call) packet sent
+
+	calls callLane // see calls.go
 }
 
 // RealtimeAt is when the bond last sent real-time media (a call is on while
@@ -173,6 +175,7 @@ func (e *Engine) ReorderStats() (reorder.Stats, time.Duration, int) {
 // when the peer's sequence numbers restart.
 func (e *Engine) ResetRx() {
 	e.win.Reset()
+	e.calls.win.Reset()
 	e.gaps.reset()
 	e.rmu.Lock()
 	e.reorder = reorder.Buffer{MaxHold: e.reorder.MaxHold}
@@ -264,6 +267,9 @@ func (e *Engine) Send(pkt []byte) int {
 	realtime := pol.Realtime(info)
 	if realtime {
 		e.realtimeAt.Store(nowN)
+		if e.calls.on.Load() {
+			return e.sendCall(pkt, links, othersAlive, now)
+		}
 	}
 	var cbuf [16]sched.Candidate
 	cands := cbuf[:0]
@@ -414,6 +420,10 @@ func (e *Engine) Receive(l *Link, frame []byte) {
 	l.Rx.Add(len(frame))
 	now := time.Now()
 	l.LastRx.Store(now.UnixNano())
+	if seq&callLaneBit != 0 {
+		e.acceptCall(l, seq, payload, now)
+		return
+	}
 	e.accept(l, seq, payload, now)
 }
 

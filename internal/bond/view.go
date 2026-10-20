@@ -174,6 +174,9 @@ type EngineView struct {
 	QuietsSent    uint64  `json:"quietsSent"`
 	QuietsRecv    uint64  `json:"quietsRecv"`
 	QueueDrops    uint64  `json:"queueDrops"`
+	CallLane      bool    `json:"callLane"`
+	CallsTx       uint64  `json:"callsTx"`
+	CallsRx       uint64  `json:"callsRx"`
 }
 
 func (e *Engine) View() EngineView {
@@ -206,6 +209,9 @@ func (e *Engine) View() EngineView {
 		Reinjected:    e.Reinjected.Load(),
 		NacksSent:     e.NacksSent.Load(),
 		NacksRecv:     e.NacksRecv.Load(),
+		CallLane:      e.calls.on.Load(),
+		CallsTx:       e.calls.Tx.Load(),
+		CallsRx:       e.calls.Rx.Load(),
 	}
 	e.gaps.mu.Lock()
 	v.GapsDetected, v.GapsRecovered, v.GapsGaveUp = e.gaps.Detected, e.gaps.Recovered, e.gaps.GaveUp

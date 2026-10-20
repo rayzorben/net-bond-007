@@ -298,6 +298,9 @@ type HelloAck struct {
 	Epoch int64 `json:"epoch"`
 	// FEC: the server understands FEC frames, so the client may send them.
 	FEC bool `json:"fec,omitempty"`
+	// CallLane: the server understands call-lane DATA frames (sequence
+	// numbers with the top bit set), so the client may send them.
+	CallLane bool `json:"callLane,omitempty"`
 }
 
 // Policy tells the server how to schedule downstream traffic for a session.
@@ -320,6 +323,9 @@ type Policy struct {
 	// FEC asks the server to protect downstream links with FEC frames
 	// (sized automatically from measured loss).
 	FEC bool `json:"fec,omitempty"`
+	// CallLane: the client understands call-lane DATA frames, so the server
+	// may send calls on it.
+	CallLane bool `json:"callLane,omitempty"`
 	// Feature switches for loss handling (absent from older clients: off).
 	RepairPriority  bool `json:"repairPriority,omitempty"`
 	StormRepair     bool `json:"stormRepair,omitempty"`

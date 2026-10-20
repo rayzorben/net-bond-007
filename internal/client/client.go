@@ -206,6 +206,7 @@ func (c *Client) applyPolicy(e *bond.Engine, cfg *config.Client) {
 	// Upstream FEC only toward a server that understands it.
 	a := c.ack.Load()
 	e.SetFEC(cfg.Bonding.FEC && a != nil && a.FEC)
+	e.SetCallLane(a != nil && a.CallLane)
 	e.SetFeatures(bond.Features{
 		RepairPriority: cfg.Bonding.RepairPriority,
 		StormRepair:    cfg.Bonding.StormRepair,
@@ -245,6 +246,7 @@ func (c *Client) wirePolicy() proto.Policy {
 		Retransmit:             cfg.Bonding.Retransmit,
 		Shaping:                cfg.Bonding.Shaping,
 		FEC:                    cfg.Bonding.FEC,
+		CallLane:               true,
 		RepairPriority:         cfg.Bonding.RepairPriority,
 		StormRepair:            cfg.Bonding.StormRepair,
 		OutageReports:          cfg.Bonding.OutageReports,
@@ -517,7 +519,7 @@ func (c *Client) onHelloAck(a proto.HelloAck) {
 	}
 	c.epoch = a.Epoch
 	c.mu.Unlock()
-	if prev == nil || prev.FEC != a.FEC {
+	if prev == nil || prev.FEC != a.FEC || prev.CallLane != a.CallLane {
 		if e := c.engine.Load(); e != nil {
 			c.applyPolicy(e, c.cfg.Get())
 		}

@@ -447,6 +447,7 @@ func (s *Server) hello(f []byte, h proto.Header, from pkt) {
 		Version:    Version,
 		Epoch:      ss.Created.UnixNano(),
 		FEC:        true,
+		CallLane:   true,
 	})
 	l.SendRaw(ack)
 	s.applyPolicy(ss)
@@ -561,6 +562,7 @@ func (s *Server) applyPolicy(ss *Session) {
 	}
 	ss.Engine.SetARQ(p.Retransmit)
 	ss.Engine.SetFEC(p.FEC) // only FEC-capable clients ask for it
+	ss.Engine.SetCallLane(p.CallLane)
 	ss.Engine.SetFeatures(bond.Features{RepairPriority: p.RepairPriority, StormRepair: p.StormRepair, OutageReports: p.OutageReports})
 	if s.gw != nil {
 		s.gw.SetLossTolerant(ss.IP, p.LossTolerantTCP) // applies to new connections
