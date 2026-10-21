@@ -69,6 +69,15 @@ func TestPinNftRulesRealtime(t *testing.T) {
 	if i < 0 || j < 0 || i > j || !strings.Contains(rules, "udp sport { 3478-3481, 8801 }") {
 		t.Fatalf("calls must be pinned to the tunnel before the catch-all:\n%s", rules)
 	}
+	// A UDP socket already pinned keeps its path for every new flow, ahead
+	// of the call exception, so it never leaves from two public addresses.
+	sticky := `ip saddr . udp sport @usrc_1 ct mark set ct mark & 0xf0ffffff | 0x01000000`
+	if k := strings.Index(rules, sticky); k < 0 || k > i {
+		t.Fatalf("sticky UDP rule must come before the call exception:\n%s", rules)
+	}
+	if !strings.Contains(rules, `ct direction original ct mark & 0x0f000000 == 0x02000000 update @usrc_2 { ip saddr . udp sport }`) {
+		t.Fatalf("sockets on the current path are not remembered:\n%s", rules)
+	}
 	// Already in the tunnel: no exception needed.
 	s.Current = 1
 	if strings.Contains(PinNftRules(s), "dport") {
@@ -94,6 +103,10 @@ func TestPinNftRules(t *testing.T) {
 	}
 	if strings.Contains(rules, "0x02000000 meta l4proto tcp reject") {
 		t.Fatal("a live path is being reset")
+	}
+	// A dead path forgets its sockets so they move to the current path.
+	if strings.Contains(rules, "@usrc_1") || !strings.Contains(rules, "flush set ip net_bond_007_pin usrc_1") {
+		t.Fatalf("dead path still sticky:\n%s", rules)
 	}
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft not installed")
