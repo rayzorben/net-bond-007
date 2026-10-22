@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -85,6 +86,7 @@ type Client struct {
 	tunErr  string
 	pins    pinState     // guarded by tunMu
 	portmap portMapState // guarded by tunMu
+	bypass  bypassState
 	fwd     atomic.Pointer[fwdStatus]
 	guard   guardState
 	direct  directMeter
@@ -201,6 +203,7 @@ func (c *Client) deliver(pkt []byte) {
 	t := c.tun
 	c.tunMu.Unlock()
 	if t != nil {
+		c.bypassSnoop(pkt)
 		t.Write(pkt)
 	}
 }
@@ -315,6 +318,9 @@ func (c *Client) onConfig(old, cfg *config.Client) {
 	if old.Tunnel != cfg.Tunnel {
 		go c.applyTunnel()
 	}
+	if !slices.Equal(old.Bypass, cfg.Bypass) {
+		c.bypassConfig(cfg)
+	}
 	c.poke()
 }
 
@@ -338,6 +344,7 @@ func (c *Client) loop() {
 			c.tick(now)
 			c.directTick(now)
 			c.speedTick(now, c.cfg.Get())
+			c.bypassTick(now, c.cfg.Get())
 		}
 	}
 }
@@ -804,6 +811,7 @@ func (c *Client) applyTunnel() {
 	c.tunErr = ""
 	c.refreshPinsLocked(cfg)
 	c.refreshPortMapLocked(cfg)
+	c.refreshBypassLocked(cfg)
 	if spec.Direct {
 		c.log.Info("going direct, bypassing the tunnel", "via", spec.DirectDev, "gateway", spec.DirectGW)
 		return
@@ -826,6 +834,7 @@ func (c *Client) closeTunnel() {
 func (c *Client) closeTunnelLocked() {
 	c.clearPinsLocked()
 	c.clearPortMapLocked()
+	c.clearBypassLocked()
 	if c.tunUndo != nil {
 		c.tunUndo()
 		c.tunUndo = nil
@@ -1158,6 +1167,49 @@ func (b Backend) Routes(mux *http.ServeMux) {
 		b.C.policySent.Store(0) // tell the server now, not in up to 5 s
 		b.C.poke()
 		v := b.C.Forwards()
+		w.Header().Set("ETag", `"`+v.Version+`"`)
+		webui.WriteJSON(w, http.StatusOK, v)
+	})
+	mux.HandleFunc("GET /api/x/bypass", func(w http.ResponseWriter, r *http.Request) {
+		v := b.C.Bypasses()
+		w.Header().Set("ETag", `"`+v.Version+`"`)
+		webui.WriteJSON(w, http.StatusOK, v)
+	})
+	// Replace the whole bypass list, with the same If-Match check as the
+	// port forwards.
+	mux.HandleFunc("PUT /api/x/bypass", func(w http.ResponseWriter, r *http.Request) {
+		var bs []config.Bypass
+		if err := json.NewDecoder(r.Body).Decode(&bs); err != nil {
+			webui.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if bs == nil {
+			bs = []config.Bypass{}
+		}
+		for i := range bs {
+			bs[i].Host = config.NormalizeHost(bs[i].Host)
+			bs[i].Name = strings.TrimSpace(bs[i].Name)
+		}
+		want := strings.Trim(strings.TrimPrefix(r.Header.Get("If-Match"), "W/"), `"`)
+		err := b.C.cfg.MutateErr(func(c *config.Client) error {
+			if want != "" && want != "*" && bypassVersion(c.Bypass) != want {
+				return errBypassStale
+			}
+			c.Bypass = bs
+			return nil
+		})
+		if err == errBypassStale {
+			v := b.C.Bypasses()
+			w.Header().Set("ETag", `"`+v.Version+`"`)
+			webui.WriteJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "current": v})
+			return
+		}
+		if err != nil {
+			webui.WriteJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		b.C.bypassTick(time.Now(), b.C.cfg.Get()) // routes now, not in up to 1 s
+		v := b.C.Bypasses()
 		w.Header().Set("ETag", `"`+v.Version+`"`)
 		webui.WriteJSON(w, http.StatusOK, v)
 	})

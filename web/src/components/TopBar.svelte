@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Sun, Moon, LogOut, LayoutDashboard, SlidersHorizontal, ScrollText, Waypoints, CalendarClock, Globe } from '@lucide/svelte'
+  import { Sun, Moon, LogOut, LayoutDashboard, SlidersHorizontal, ScrollText, Waypoints, CalendarClock, Globe, Split } from '@lucide/svelte'
   import { store, toggleTheme } from '../lib/store.svelte'
   import { bps } from '../lib/format'
 
@@ -23,7 +23,7 @@
   const tabs: { id: Page; label: string; icon: any }[] = $derived([
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
     { id: 'connections', label: 'Connections', icon: Waypoints },
-    ...(store.info?.role === 'server' ? [{ id: 'history', label: 'History', icon: CalendarClock }] : [{ id: 'ports', label: 'Ports', icon: Globe }]),
+    ...(store.info?.role === 'server' ? [{ id: 'history', label: 'History', icon: CalendarClock }] : [{ id: 'ports', label: 'Ports', icon: Globe }, { id: 'bypass', label: 'Bypass', icon: Split }]),
     { id: 'settings', label: 'Settings', icon: SlidersHorizontal },
     { id: 'logs', label: 'Logs', icon: ScrollText },
   ] as { id: Page; label: string; icon: any }[])

@@ -249,3 +249,34 @@ func TestFlapDampingDefaultsFillOlderFiles(t *testing.T) {
 		t.Fatalf("defaults not filled: hold=%d cool=%d", c.Interfaces.HoldSec, c.Interfaces.CooldownSec)
 	}
 }
+
+func TestBypassValidate(t *testing.T) {
+	c := DefaultClient()
+	c.Bypass = []Bypass{{Host: "SeatGeek.com."}, {Host: "*.px-cloud.net"}, {Host: "1.2.3.4"}, {Host: "10.0.0.0/8"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "not a host", "seatgeek", "-x.com", "*.", "1.2.3.4/33"} {
+		c.Bypass = []Bypass{{Host: bad}}
+		if err := c.Validate(); err == nil {
+			t.Errorf("%q should be refused", bad)
+		}
+	}
+	c.Bypass = []Bypass{{Host: "a.com"}, {Host: "A.com"}}
+	if err := c.Validate(); err == nil {
+		t.Error("duplicates should be refused")
+	}
+	b := Bypass{Host: "seatgeek.com"}
+	for name, want := range map[string]bool{"seatgeek.com": true, "API.seatgeek.com.": true, "notseatgeek.com": false, "seatgeek.com.evil": false} {
+		if b.Matches(name) != want {
+			t.Errorf("%q matches %q = %v, want %v", b.Host, name, !want, want)
+		}
+	}
+	w := Bypass{Host: "*.px-cloud.net"}
+	if !w.Matches("a.b.px-cloud.net") || w.Matches("px-cloud.net") {
+		t.Error("wildcard matching")
+	}
+	if p := (Bypass{Host: "10.1.2.3/8"}).Prefix(); p.String() != "10.0.0.0/8" {
+		t.Errorf("prefix %v", p)
+	}
+}

@@ -29,6 +29,10 @@ type Client struct {
 	Links      map[string]Link `json:"links" schema:"-"`
 	// Forwards open public ports on the server for LAN devices (router mode).
 	Forwards []Forward `json:"forwards" schema:"-"`
+	// Bypass lists hosts whose traffic never enters the bond: sites that
+	// block or challenge data-center addresses (ticket sellers behind bot
+	// checks) are reached straight out of a physical link instead.
+	Bypass []Bypass `json:"bypass" schema:"-"`
 	// Version of the saved settings format, used to migrate old defaults.
 	Version int `json:"configVersion" schema:"-"`
 	UI      UI  `json:"ui" label:"Dashboard" help:"This web interface."`
@@ -152,6 +156,88 @@ func (f Forward) Protos() []string {
 		return []string{"tcp", "udp"}
 	}
 	return []string{f.Proto}
+}
+
+// Bypass is one host, or address range, kept out of the bond. Host is a
+// domain name ("seatgeek.com" covers the name and every name under it,
+// "*.seatgeek.com" only those under it), an IP address or a CIDR.
+type Bypass struct {
+	Host     string `json:"host"`
+	Name     string `json:"name,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// Prefix returns the address range a literal entry covers (invalid for a
+// domain name).
+func (b Bypass) Prefix() netip.Prefix {
+	h := strings.TrimSpace(b.Host)
+	if p, err := netip.ParsePrefix(h); err == nil {
+		return p.Masked()
+	}
+	if a, err := netip.ParseAddr(h); err == nil {
+		return netip.PrefixFrom(a, a.BitLen())
+	}
+	return netip.Prefix{}
+}
+
+// Matches reports whether a DNS name falls under this entry.
+func (b Bypass) Matches(name string) bool {
+	if b.Prefix().IsValid() {
+		return false
+	}
+	name = NormalizeHost(name)
+	pat := NormalizeHost(b.Host)
+	if sub, ok := strings.CutPrefix(pat, "*."); ok {
+		return strings.HasSuffix(name, "."+sub)
+	}
+	return name == pat || strings.HasSuffix(name, "."+pat)
+}
+
+// NormalizeHost lower-cases a name and strips the trailing dot and spaces.
+func NormalizeHost(h string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+}
+
+func validateBypass(bs []Bypass) []error {
+	var errs []error
+	seen := map[string]bool{}
+	for i, b := range bs {
+		where := fmt.Sprintf("bypass[%d]", i)
+		h := NormalizeHost(b.Host)
+		if h == "" {
+			errs = append(errs, fmt.Errorf("%s: a host name or address is required", where))
+			continue
+		}
+		if seen[h] {
+			errs = append(errs, fmt.Errorf("%s: %q is listed twice", where, b.Host))
+		}
+		seen[h] = true
+		if b.Prefix().IsValid() {
+			continue
+		}
+		name := strings.TrimPrefix(h, "*.")
+		if !validHostname(name) {
+			errs = append(errs, fmt.Errorf("%s: %q is not a domain name, IP address or CIDR", where, b.Host))
+		}
+	}
+	return errs
+}
+
+func validHostname(h string) bool {
+	if len(h) == 0 || len(h) > 253 || !strings.Contains(h, ".") {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateForwards(fs []Forward) []error {
@@ -283,6 +369,7 @@ func (c *Client) Validate() error {
 		errs = append(errs, errors.New("health.probeTimeoutMs must be at least the probe interval"))
 	}
 	errs = append(errs, validateForwards(c.Forwards)...)
+	errs = append(errs, validateBypass(c.Bypass)...)
 	for name, l := range c.Links {
 		if l.Weight < 0 || l.MaxMbps < 0 {
 			errs = append(errs, fmt.Errorf("links.%s: weight and maxMbps must be >= 0", name))

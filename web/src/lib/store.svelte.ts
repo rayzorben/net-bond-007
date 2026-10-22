@@ -14,7 +14,7 @@ class Store {
   totals = $state<Point[]>([])
   config = $state<any>(null)
   schema = $state<Section[]>([])
-  page = $state<'overview' | 'connections' | 'history' | 'ports' | 'settings' | 'logs'>('overview')
+  page = $state<'overview' | 'connections' | 'history' | 'ports' | 'bypass' | 'settings' | 'logs'>('overview')
   selected = $state<string | null>(null) // link key for the drill-down drawer
   toasts = $state<{ id: number; kind: 'ok' | 'err' | 'info'; text: string }[]>([])
 
