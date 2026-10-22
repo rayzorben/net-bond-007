@@ -103,6 +103,13 @@ type Interfaces struct {
 	AutoAdd bool   `json:"autoAdd" label:"Bond new interfaces automatically" help:"Plug in a phone or join Wi-Fi and it joins the bond."`
 	Exclude string `json:"exclude" label:"Ignore interfaces" help:"Comma-separated name patterns (* wildcard) never used as links." adv:"1"`
 	ScanMs  int    `json:"scanMs" label:"Scan interval" help:"How often to look for added or removed interfaces." min:"500" max:"60000" unit:"ms" adv:"1"`
+	// A link whose interface vanishes is kept (marked down) for HoldSec
+	// before it is removed, and a removed link is not re-added for
+	// CooldownSec: a USB tether that re-enumerates every half minute must
+	// not drag the bond (and the router's hotplug scripts) through a
+	// teardown and rebuild each time.
+	HoldSec     int `json:"holdSec" label:"Hold a vanished link" help:"Seconds a link whose interface disappeared is kept, marked down, before it is removed. Rides out brief flaps." min:"0" max:"600" unit:"s" adv:"1"`
+	CooldownSec int `json:"cooldownSec" label:"Re-add cool-down" help:"Seconds after a link is removed before the same interface can rejoin the bond (unless it is the only one)." min:"0" max:"3600" unit:"s" adv:"1"`
 }
 
 // Link holds per-interface overrides, keyed by interface name.
@@ -236,7 +243,7 @@ func DefaultClient() *Client {
 			URL: "https://speed.cloudflare.com",
 		},
 		Interfaces: Interfaces{
-			AutoAdd: true, ScanMs: 2000,
+			AutoAdd: true, ScanMs: 2000, HoldSec: 20, CooldownSec: 60,
 			Exclude: "lo*,docker*,veth*,br-*,virbr*,vmnet*,vboxnet*,tailscale*,zt*,wg*,tun*,tap*,utun*,net-bond-007*,awdl*,llw*,anpi*,ap1,bridge*,gif*,stf*,ipsec*,ppp*,isatap*,Teredo*,*Loopback*,vEthernet*,lxc*,cni*,flannel*,kube*,ifb*,dummy*,sit*,ip6tnl*",
 		},
 		Relay: Relay{Listen: "0.0.0.0:7008"},

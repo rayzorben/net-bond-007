@@ -52,12 +52,20 @@ type Client struct {
 	// NoTunnel disables the OS adapter; packets go to Deliver instead.
 	NoTunnel bool
 	Deliver  func(pkt []byte)
+	// now is the clock reconcile uses (tests advance it).
+	now func() time.Time
 
 	engine atomic.Pointer[bond.Engine]
 
-	mu        sync.Mutex
-	links     map[string]*clink
-	ids       map[string]uint8
+	mu    sync.Mutex
+	links map[string]*clink
+	ids   map[string]uint8
+	// Flap damping: gone records when a link's interface was first missing
+	// (it is held, marked down, until Interfaces.HoldSec passes); cooldown
+	// records when a link was removed or failed to open, so the same name
+	// is not re-added for Interfaces.CooldownSec.
+	gone      map[string]time.Time
+	cooldown  map[string]time.Time
 	ifaces    []platform.Iface
 	relayIfs  []platform.Iface // phone relays, as interface entries
 	server    netip.AddrPort
@@ -101,6 +109,9 @@ func New(cfg *config.Store[config.Client], log *slog.Logger) *Client {
 		Discover: platform.Discover,
 		links:    map[string]*clink{},
 		ids:      map[string]uint8{},
+		gone:     map[string]time.Time{},
+		cooldown: map[string]time.Time{},
+		now:      time.Now,
 		started:  time.Now(),
 		closed:   make(chan struct{}),
 		kick:     make(chan struct{}, 1),
@@ -280,6 +291,8 @@ func (c *Client) onConfig(old, cfg *config.Client) {
 			l.close(true)
 			delete(c.links, name)
 		}
+		clear(c.gone)
+		clear(c.cooldown)
 		c.server = netip.AddrPort{}
 		c.mu.Unlock()
 		c.newSession()
@@ -399,7 +412,7 @@ func (c *Client) reconcile() {
 		}
 		return
 	}
-	now := time.Now()
+	now := c.now()
 	for _, l := range c.links {
 		if l.link.State().Usable() {
 			c.lastHealthy = now
@@ -439,12 +452,44 @@ func (c *Client) reconcile() {
 			want[it.Name] = it
 		}
 	}
+	hold := time.Duration(cfg.Interfaces.HoldSec) * time.Second
+	cool := time.Duration(cfg.Interfaces.CooldownSec) * time.Second
 	for name, l := range c.links {
 		it, ok := want[name]
-		if !ok || it.PrimaryIPv4() != l.iface.PrimaryIPv4() || it.Index != l.iface.Index || l.relayTo != relayAddrs[name] {
-			c.log.Info("link removed", "link", name)
-			l.close(true)
-			delete(c.links, name)
+		if ok && it.PrimaryIPv4() == l.iface.PrimaryIPv4() && it.Index == l.iface.Index && l.relayTo == relayAddrs[name] {
+			if l.held.Swap(false) {
+				c.log.Info("link is back", "link", name, "after", now.Sub(c.gone[name]).Round(time.Second))
+			}
+			delete(c.gone, name)
+			continue
+		}
+		// Removed on purpose (disabled, excluded, relay changed)? Then at
+		// once. Otherwise the interface is gone, or came back as a
+		// different device (a USB tether that re-enumerated gets a new
+		// index; the old socket is dead either way): hold the link, marked
+		// down, so a short flap costs nothing, and tear it down only once
+		// it has stayed gone.
+		since, held := c.gone[name]
+		present, flap := c.ifaceFlapped(cfg, ifs, l)
+		deliberate := present && !flap
+		if deliberate {
+			since, held = now.Add(-hold), true
+		} else if !held {
+			since = now
+			c.gone[name] = now
+			l.held.Store(true)
+			l.link.SetState(bond.StateDown)
+			c.log.Info("link lost; holding", "link", name, "for", hold)
+		}
+		if now.Sub(since) < hold {
+			continue
+		}
+		c.log.Info("link removed", "link", name, "gone", now.Sub(since).Round(time.Second))
+		l.close(true)
+		delete(c.links, name)
+		delete(c.gone, name)
+		if !deliberate {
+			c.cooldown[name] = now
 		}
 	}
 	e := c.engine.Load()
@@ -452,10 +497,19 @@ func (c *Client) reconcile() {
 		if _, ok := c.links[name]; ok {
 			continue
 		}
+		// A link that was just removed (or would not open) waits out the
+		// cool-down, unless it is the only link we could have.
+		if at, ok := c.cooldown[name]; ok && now.Sub(at) < cool && len(c.links) > 0 {
+			continue
+		}
+		delete(c.cooldown, name)
 		id := c.linkID(name)
 		l, err := c.openLink(e, it, id, relayAddrs[name])
 		if err != nil {
 			c.log.Warn("cannot open link", "link", name, "err", err)
+			// Back-dated so the cool-down check above retries after
+			// linkRetryAfter rather than a full cool-down.
+			c.cooldown[name] = now.Add(linkRetryAfter - cool)
 			continue
 		}
 		c.links[name] = l
@@ -474,6 +528,31 @@ func (c *Client) reconcile() {
 		})
 	}
 }
+
+// ifaceFlapped reports whether a link's interface is still in the scan and,
+// if so, whether the reason the link no longer matches is a flap (the
+// device went down, lost its address or re-enumerated) rather than a
+// configuration change.
+func (c *Client) ifaceFlapped(cfg *config.Client, ifs []platform.Iface, l *clink) (present, flap bool) {
+	if l.relayTo.IsValid() {
+		return false, false
+	}
+	for _, it := range ifs {
+		if it.Name != l.iface.Name {
+			continue
+		}
+		switch c.eligibility(cfg, it) {
+		case "bonded", "down", "no-ipv4":
+			return true, true
+		}
+		return true, false
+	}
+	return false, false
+}
+
+// linkRetryAfter is how soon a link whose socket would not open (the address
+// is not assigned yet, the device is mid re-enumeration) is tried again.
+const linkRetryAfter = 5 * time.Second
 
 // linkID returns a stable small id per interface name for this process.
 func (c *Client) linkID(name string) uint8 {

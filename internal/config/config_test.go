@@ -236,3 +236,16 @@ func TestV6TestsDailyAndCoversMoreCalls(t *testing.T) {
 		t.Fatalf("realtime ports not migrated: %q", c.Bonding.RealtimePorts)
 	}
 }
+
+func TestFlapDampingDefaultsFillOlderFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.json")
+	os.WriteFile(path, []byte(`{"configVersion":6,"interfaces":{"autoAdd":true,"scanMs":2000}}`), 0o600)
+	st, err := Load(path, DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := st.Get(); c.Interfaces.HoldSec != 20 || c.Interfaces.CooldownSec != 60 {
+		t.Fatalf("defaults not filled: hold=%d cool=%d", c.Interfaces.HoldSec, c.Interfaces.CooldownSec)
+	}
+}

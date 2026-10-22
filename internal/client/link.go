@@ -27,8 +27,11 @@ type clink struct {
 
 	helloAcked atomic.Bool
 	rejected   atomic.Pointer[string]
-	done       chan struct{}
-	once       sync.Once
+	// held: the interface vanished; the link stays down until reconcile
+	// removes it or the interface returns (see Interfaces.HoldSec).
+	held atomic.Bool
+	done chan struct{}
+	once sync.Once
 
 	mu         sync.Mutex
 	probes     metrics.ProbeTracker
@@ -289,6 +292,9 @@ func (l *clink) evaluate(now time.Time) {
 	}, everAcked && l.helloAcked.Load(), now.Sub(last), effRTT, loss)
 	if prev := l.link.State(); testing && st == bond.StateDegraded && prev == bond.StateUp {
 		st = prev // a saturated link during a speed test isn't degraded
+	}
+	if l.held.Load() {
+		st = bond.StateDown // the interface is gone; whatever the probes say
 	}
 	if prev := l.link.State(); prev != st {
 		l.c.log.Info("link state", "link", l.iface.Name, "from", prev, "to", st)
