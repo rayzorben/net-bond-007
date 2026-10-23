@@ -78,9 +78,14 @@ type Client struct {
 	lastHealthy time.Time
 	fail        failOpen // guarded by mu
 
-	ack     atomic.Pointer[proto.HelloAck]
-	tunMu   sync.Mutex
-	tun     *platform.Tun
+	ack   atomic.Pointer[proto.HelloAck]
+	tunMu sync.Mutex
+	tun   *platform.Tun
+	// tunLive mirrors tun for lock-free readers. The packet path and
+	// eligibility (called with mu held) must never wait for tunMu:
+	// applyTunnel holds tunMu while taking mu, and that inversion once
+	// froze the receive path for 90 minutes with routes stuck in the tunnel.
+	tunLive atomic.Pointer[platform.Tun]
 	tunSpec platform.TunnelSpec
 	tunUndo func()
 	tunErr  string
@@ -199,10 +204,7 @@ func (c *Client) deliver(pkt []byte) {
 		c.Deliver(pkt)
 		return
 	}
-	c.tunMu.Lock()
-	t := c.tun
-	c.tunMu.Unlock()
-	if t != nil {
+	if t := c.tunLive.Load(); t != nil {
 		c.bypassSnoop(pkt)
 		t.Write(pkt)
 	}
@@ -389,10 +391,8 @@ func (c *Client) eligibility(cfg *config.Client, it platform.Iface) string {
 }
 
 func (c *Client) tunName() string {
-	c.tunMu.Lock()
-	defer c.tunMu.Unlock()
-	if c.tun != nil {
-		return c.tun.Name()
+	if t := c.tunLive.Load(); t != nil {
+		return t.Name()
 	}
 	return ""
 }
@@ -792,6 +792,7 @@ func (c *Client) applyTunnel() {
 			return
 		}
 		c.tun = t
+		c.tunLive.Store(t)
 		go func() {
 			err := t.ReadLoop(func(pkt []byte) { c.SendPacket(pkt) })
 			c.log.Debug("tunnel reader stopped", "err", err)
@@ -841,6 +842,7 @@ func (c *Client) closeTunnelLocked() {
 	}
 	if c.tun != nil {
 		c.tun.Close()
+		c.tunLive.Store(nil)
 		c.tun = nil
 		c.log.Info("virtual adapter removed")
 	}

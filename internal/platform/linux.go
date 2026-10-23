@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -68,8 +70,14 @@ func BindControl(ifName string, ifIndex int) func(network, address string, c sys
 	}
 }
 
+// runTimeout bounds every helper command: callers hold the tunnel lock, and
+// a hung ip/nft/conntrack must not hold it forever.
+const runTimeout = 20 * time.Second
+
 func run(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
