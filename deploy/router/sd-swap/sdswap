@@ -6,7 +6,7 @@
 START=12
 STOP=95
 
-DEV=/dev/mmcblk0p2
+DEV=/dev/mmcblk0
 MNT=/mnt/sd
 SWAP=$MNT/net-bond-swapfile
 
