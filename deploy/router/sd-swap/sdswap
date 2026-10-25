@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# Swap file on the Slate AX's SD card. The router has 414 MB of RAM and no
+# swap, so a memory spike (AdGuard reloading its blocklists) used to thrash it
+# into a hard freeze. Install: copy to /etc/init.d/sdswap, chmod +x, enable.
+
+START=12
+STOP=95
+
+DEV=/dev/mmcblk0p2
+MNT=/mnt/sd
+SWAP=$MNT/net-bond-swapfile
+
+start() {
+	mkdir -p "$MNT"
+	grep -q " $MNT " /proc/mounts || mount -t ext4 -o noatime "$DEV" "$MNT" || return 1
+	[ -f "$SWAP" ] || return 1
+	grep -q "^$SWAP " /proc/swaps || swapon "$SWAP"
+	echo 80 > /proc/sys/vm/swappiness
+	logger -t sdswap "swap on: $(grep "^$SWAP " /proc/swaps)"
+}
+
+stop() {
+	grep -q "^$SWAP " /proc/swaps && swapoff "$SWAP"
+	return 0
+}
