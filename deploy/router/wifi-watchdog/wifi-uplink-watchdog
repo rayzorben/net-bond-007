@@ -1,0 +1,100 @@
+#!/bin/sh
+# Keeps the LAN Wi-Fi alive while park Wi-Fi uplinks come and go.
+#
+# On OpenWrt a radio that carries a client (sta) uplink only starts its own
+# AP once that uplink has associated, because the AP must follow the upstream
+# channel. An uplink that cannot connect therefore takes that band's LAN SSID
+# down with it. GL's repeater hides this; with it replaced by one uplink per
+# radio (deploy/router/dual-wifi.sh) this daemon does the same job:
+#
+#   - every wifi-iface with mode=sta is watched;
+#   - one that stays unassociated for STUCK seconds is disabled, so its radio
+#     falls back to serving the LAN on its own channel;
+#   - it is re-enabled after a back-off (RETRY, doubling up to MAXRETRY) and
+#     gets another STUCK seconds to associate.
+#
+# Associated-but-no-DHCP is left alone: the LAN AP is up in that case and the
+# bonding client simply has no address to use on that link.
+#
+# Disabling writes /etc/config/wireless; the back-off keeps flash writes rare.
+# On start every uplink is re-enabled so each boot tries all of them.
+
+STUCK=${STUCK:-60}
+RETRY=${RETRY:-120}
+MAXRETRY=${MAXRETRY:-1800}
+TICK=5
+
+log() { logger -t wifi-watchdog "$*"; }
+
+now() { cut -d. -f1 /proc/uptime; }
+
+uplinks() {
+	uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)\.mode='sta'$/\1/p"
+}
+
+# Per-uplink state lives in shell variables named after the uci section.
+get() { eval "echo \${$1_$2:-}"; }
+put() { eval "$1_$2=\$3"; }
+
+set_disabled() { # section 0|1
+	uci set wireless.$1.disabled=$2
+	uci commit wireless
+	wifi reload
+}
+
+associated() { # ifname
+	iw dev "$1" link 2>/dev/null | grep -q '^Connected'
+}
+
+start=$(now)
+for s in $(uplinks); do
+	if [ "$(uci -q get wireless.$s.disabled)" = 1 ]; then
+		log "$s: enabling at start"
+		set_disabled $s 0
+	fi
+	put $s since "$start"
+	put $s backoff "$RETRY"
+	put $s retry_at 0
+done
+
+while :; do
+	t=$(now)
+	for s in $(uplinks); do
+		[ -n "$(get $s backoff)" ] || { put $s since "$t"; put $s backoff "$RETRY"; put $s retry_at 0; }
+		ifname=$(uci -q get wireless.$s.ifname)
+		radio=$(uci -q get wireless.$s.device)
+		if [ "$(uci -q get wireless.$s.disabled)" = 1 ]; then
+			if [ "$t" -ge "$(get $s retry_at)" ]; then
+				log "$s ($ifname on $radio): retrying uplink"
+				set_disabled $s 0
+			fi
+			# Re-enabled by us or by hand: either way it gets a full STUCK.
+			put $s since "$t"
+			continue
+		fi
+		if associated "$ifname"; then
+			if [ "$(get $s up)" != 1 ]; then
+				log "$s ($ifname on $radio): associated to $(iw dev "$ifname" link | awk '/^Connected/{print $3}')"
+				put $s up 1
+				put $s backoff "$RETRY"
+			fi
+			put $s since "$t"
+			continue
+		fi
+		if [ "$(get $s up)" = 1 ]; then
+			log "$s ($ifname on $radio): lost association"
+			put $s up 0
+			put $s since "$t"
+		fi
+		if [ $((t - $(get $s since))) -ge "$STUCK" ]; then
+			b=$(get $s backoff)
+			log "$s ($ifname on $radio): not associated for ${STUCK}s; disabling for ${b}s so the LAN AP comes back"
+			put $s retry_at $((t + b))
+			b=$((b * 2))
+			[ "$b" -gt "$MAXRETRY" ] && b=$MAXRETRY
+			put $s backoff "$b"
+			set_disabled $s 1
+		fi
+	done
+	sleep $TICK
+done
